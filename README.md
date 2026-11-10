@@ -61,7 +61,7 @@ Google Sheets (gspread + google-auth)
 pytest tests/ -v
 ```
 
-Covers the `Voucher` schema (required fields/type validation) and the `extraer_datos_voucher` function (mocking the Gemini client, no real API calls).
+Covers the `Voucher` schema (required fields/type validation) and the `extract_voucher_data` function (mocking the Gemini client, no real API calls).
 
 ## Security
 

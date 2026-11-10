@@ -31,12 +31,12 @@ PROMPT = (
 
 
 class Voucher(BaseModel):
-    comercio: str = Field(description="Nombre del comercio o establecimiento")
-    fecha: str = Field(description="Fecha del voucher en formato DD/MM/AAAA")
-    mes_texto: str = Field(description="Nombre del mes en inglés, ej: January")
-    monto_total: float = Field(description="Monto total pagado")
-    iva: float = Field(default=0.0, description="Monto de IVA/impuesto, si aplica")
-    categoria_sugerida: str = Field(
+    merchant: str = Field(description="Nombre del comercio o establecimiento")
+    purchase_date: str = Field(description="Fecha del voucher en formato DD/MM/AAAA")
+    month_name: str = Field(description="Nombre del mes en inglés, ej: January")
+    total_amount: float = Field(description="Monto total pagado")
+    tax_amount: float = Field(default=0.0, description="Monto de IVA/impuesto, si aplica")
+    suggested_category: str = Field(
         description="Categoría de gasto sugerida, ej: Comida, Transporte, Otros"
     )
 
@@ -53,9 +53,9 @@ _PEM_BLOCK_RE = re.compile(
 
 
 def _normalize_private_key(private_key: str) -> str:
-    """Reconstruye un PEM canónico a partir de una clave potencialmente mal
-    formateada por el copiado/pegado en secrets.toml (saltos de línea
-    perdidos, "\\n" literales, CRLF, espacios de indentación, etc.)."""
+    """Rebuild a canonical PEM from a key that may have been mangled when
+    pasted into secrets.toml (lost line breaks, literal "\\n", CRLF,
+    indentation whitespace, etc.)."""
     key = private_key.replace("\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
     match = _PEM_BLOCK_RE.search(key)
     if not match:
@@ -79,8 +79,8 @@ def get_sheets_client() -> gspread.Client:
     return gspread.service_account_from_dict(creds_dict, scopes=SHEETS_SCOPES)
 
 
-def extraer_datos_voucher(client: genai.Client, img: Image.Image) -> Voucher:
-    """Llama a Gemini pidiendo un structured output validado contra el esquema Voucher."""
+def extract_voucher_data(client: genai.Client, img: Image.Image) -> Voucher:
+    """Call Gemini requesting a structured output validated against the Voucher schema."""
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=[PROMPT, img],
@@ -94,17 +94,17 @@ def extraer_datos_voucher(client: genai.Client, img: Image.Image) -> Voucher:
     return response.parsed
 
 
-def guardar_en_google_sheets(gc: gspread.Client, voucher: Voucher) -> None:
+def save_to_google_sheets(gc: gspread.Client, voucher: Voucher) -> None:
     sh = gc.open(SHEET_NAME).worksheet(WORKSHEET_NAME)
-    fila = [
-        voucher.comercio,
-        voucher.fecha,
-        voucher.mes_texto,
-        voucher.monto_total,
-        voucher.iva,
-        voucher.categoria_sugerida,
+    row = [
+        voucher.merchant,
+        voucher.purchase_date,
+        voucher.month_name,
+        voucher.total_amount,
+        voucher.tax_amount,
+        voucher.suggested_category,
     ]
-    sh.append_row(fila)
+    sh.append_row(row)
 
 
 def main() -> None:
@@ -112,25 +112,25 @@ def main() -> None:
     st.title("📸 Scanner de Vouchers Pro")
     st.write("Captura o sube tu voucher para guardarlo en tu presupuesto.")
 
-    if "contador_escaneo" not in st.session_state:
-        st.session_state.contador_escaneo = 0
+    if "scan_counter" not in st.session_state:
+        st.session_state.scan_counter = 0
 
     tab1, tab2 = st.tabs(["📸 Cámara", "📁 Subir Archivo"])
     with tab1:
-        foto_camara = st.camera_input(
-            "Toma la foto", key=f"camara_{st.session_state.contador_escaneo}"
+        camera_photo = st.camera_input(
+            "Toma la foto", key=f"camera_{st.session_state.scan_counter}"
         )
     with tab2:
-        foto_archivo = st.file_uploader("Selecciona una imagen", type=["jpg", "jpeg", "png"])
+        uploaded_photo = st.file_uploader("Selecciona una imagen", type=["jpg", "jpeg", "png"])
 
-    foto = foto_camara or foto_archivo
-    if not foto:
+    photo = camera_photo or uploaded_photo
+    if not photo:
         return
 
     try:
-        img = Image.open(foto)
+        img = Image.open(photo)
     except Exception:
-        logger.exception("Archivo subido no es una imagen válida")
+        logger.exception("Uploaded file is not a valid image")
         st.error("⚠️ El archivo no parece ser una imagen válida. Sube un JPG o PNG.")
         return
 
@@ -142,21 +142,21 @@ def main() -> None:
     with st.spinner("La IA está leyendo el voucher..."):
         try:
             gemini_client = get_gemini_client()
-            voucher = extraer_datos_voucher(gemini_client, img)
+            voucher = extract_voucher_data(gemini_client, img)
         except genai_errors.APIError as exc:
-            logger.exception("Fallo en la llamada a la API de Gemini")
+            logger.exception("Gemini API call failed")
             st.error(f"⚠️ Error al comunicarse con Gemini: {exc}")
             return
         except ValueError as exc:
-            logger.exception("Respuesta de Gemini fuera de esquema")
+            logger.exception("Gemini response did not match the schema")
             st.error(f"⚠️ {exc} Intenta con una foto más clara o nítida.")
             return
         except KeyError:
-            logger.exception("Falta el secreto GEMINI_KEY")
+            logger.exception("Missing GEMINI_KEY secret")
             st.error("⚠️ No se configuró la API key de Gemini en los secretos de la app.")
             return
         except Exception:
-            logger.exception("Error inesperado al llamar a Gemini")
+            logger.exception("Unexpected error calling Gemini")
             st.error("⚠️ Ocurrió un error inesperado al leer el voucher. Intenta de nuevo.")
             return
 
@@ -164,38 +164,38 @@ def main() -> None:
 
         try:
             sheets_client = get_sheets_client()
-            guardar_en_google_sheets(sheets_client, voucher)
+            save_to_google_sheets(sheets_client, voucher)
         except SpreadsheetNotFound:
-            logger.exception("Spreadsheet no encontrado")
+            logger.exception("Spreadsheet not found")
             st.error(
                 f"⚠️ No se encontró la hoja '{SHEET_NAME}'. Verifica el nombre "
                 "y que el service account tenga acceso."
             )
             return
         except WorksheetNotFound:
-            logger.exception("Worksheet no encontrado")
+            logger.exception("Worksheet not found")
             st.error(f"⚠️ No se encontró la pestaña '{WORKSHEET_NAME}' dentro de '{SHEET_NAME}'.")
             return
         except GspreadAPIError as exc:
-            logger.exception("Fallo en la API de Google Sheets")
+            logger.exception("Google Sheets API call failed")
             st.error(f"⚠️ Error al guardar en Google Sheets: {exc}")
             return
         except (json.JSONDecodeError, KeyError):
-            logger.exception("Credenciales de Google mal configuradas en st.secrets")
+            logger.exception("Google credentials misconfigured in st.secrets")
             st.error(
                 "⚠️ Las credenciales de Google Sheets no están configuradas "
                 "correctamente en los secretos de la app."
             )
             return
         except Exception:
-            logger.exception("Error inesperado al guardar en Google Sheets")
+            logger.exception("Unexpected error saving to Google Sheets")
             st.error("⚠️ Ocurrió un error inesperado al guardar en Google Sheets.")
             return
 
         st.success("✅ ¡Datos guardados correctamente en Google Sheets!")
         st.balloons()
         if st.button("🔄 Escanear otro voucher"):
-            st.session_state.contador_escaneo += 1
+            st.session_state.scan_counter += 1
             st.rerun()
 
 
