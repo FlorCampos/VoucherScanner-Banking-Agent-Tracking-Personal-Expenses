@@ -5,7 +5,21 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from pydantic import ValidationError
 
-from app import GEMINI_MODEL, Voucher, _normalize_private_key, extract_voucher_data
+from app import (
+    GEMINI_MODEL,
+    SHEET_COLUMNS,
+    SHEET_NAME,
+    WORKSHEET_NAME,
+    CardBrand,
+    PaymentMethod,
+    Voucher,
+    VoucherItem,
+    _normalize_private_key,
+    build_sheet_rows,
+    extract_voucher_data,
+    mask_card_number,
+    save_to_google_sheets,
+)
 
 
 @pytest.fixture(scope="module")
@@ -17,6 +31,33 @@ def sample_pem() -> str:
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     ).decode()
+
+
+def make_voucher(**overrides) -> Voucher:
+    payload = {
+        "merchant": "Supermercado Lider",
+        "purchase_date": "12/03/2026",
+        "month_name": "March",
+        "items": [
+            VoucherItem(
+                product="1 bottle of 500 mL almond milk",
+                price=4.99,
+                discount=1.0,
+                category="Food",
+            ),
+            VoucherItem(
+                product="1 pack of paper towels",
+                price=8.0,
+                tax_amount=1.2,
+                category="Household",
+            ),
+        ],
+        "payment_method": PaymentMethod.CREDIT,
+        "card_brand": CardBrand.VISA,
+        "card_last4": "4417",
+    }
+    payload.update(overrides)
+    return Voucher(**payload)
 
 
 @pytest.mark.parametrize(
@@ -37,32 +78,113 @@ def test_normalize_private_key_recovers_valid_pem(sample_pem, mangle):
 
 
 def test_voucher_schema_accepts_valid_payload():
-    voucher = Voucher(
-        merchant="Supermercado Lider",
-        purchase_date="12/03/2026",
-        month_name="March",
-        total_amount=15990.0,
-        tax_amount=2550.0,
-        suggested_category="Food",
+    voucher = make_voucher()
+    assert len(voucher.items) == 2
+    assert voucher.items[0].discount == 1.0
+    assert voucher.items[1].discount == 0.0
+    assert voucher.items[0].tax_amount == 0.0
+
+
+def test_voucher_schema_parses_json_payload():
+    voucher = Voucher.model_validate(
+        {
+            "merchant": "Farmacia Cruz Verde",
+            "purchase_date": "01/01/2026",
+            "month_name": "January",
+            "items": [{"product": "1 box of bandages", "price": 3.5, "category": "Health"}],
+            "payment_method": "debit",
+            "card_brand": "Mastercard",
+            "card_last4": "0021",
+        }
     )
-    assert voucher.total_amount == 15990.0
-    assert voucher.tax_amount == 2550.0
+    assert voucher.payment_method is PaymentMethod.DEBIT
+    assert voucher.card_brand is CardBrand.MASTERCARD
+
+
+def test_voucher_schema_card_fields_are_optional():
+    voucher = make_voucher(payment_method="cash", card_brand=None, card_last4=None)
+    assert voucher.card_brand is None
+    assert voucher.card_last4 is None
 
 
 def test_voucher_schema_rejects_missing_required_fields():
     with pytest.raises(ValidationError):
-        Voucher(purchase_date="12/03/2026", total_amount=100.0)
+        Voucher(purchase_date="12/03/2026", month_name="March")
+
+
+def test_voucher_schema_rejects_unknown_payment_method():
+    with pytest.raises(ValidationError):
+        make_voucher(payment_method="crypto")
+
+
+@pytest.mark.parametrize(
+    ("last4", "expected"),
+    [
+        ("4417", "************4417"),
+        ("**** **** **** 4417", "************4417"),
+        ("12", ""),
+        ("", ""),
+        (None, ""),
+    ],
+)
+def test_mask_card_number(last4, expected):
+    assert mask_card_number(last4) == expected
+
+
+def test_build_sheet_rows_returns_one_row_per_product():
+    rows = build_sheet_rows(make_voucher())
+
+    assert rows == [
+        [
+            "Supermercado Lider",
+            "1 bottle of 500 mL almond milk",
+            4.99,
+            1.0,
+            3.99,
+            "12/03/2026",
+            "March",
+            0.0,
+            "Food",
+            "credit",
+            "Visa",
+            "************4417",
+        ],
+        [
+            "Supermercado Lider",
+            "1 pack of paper towels",
+            8.0,
+            0.0,
+            8.0,
+            "12/03/2026",
+            "March",
+            1.2,
+            "Household",
+            "credit",
+            "Visa",
+            "************4417",
+        ],
+    ]
+    assert all(len(row) == len(SHEET_COLUMNS) for row in rows)
+
+
+def test_build_sheet_rows_leaves_card_columns_empty_for_cash():
+    rows = build_sheet_rows(make_voucher(payment_method="cash"))
+
+    for row in rows:
+        assert row[-3:] == ["cash", "", ""]
+
+
+def test_build_sheet_rows_treats_negative_discount_as_positive():
+    item = VoucherItem(product="500 g of grapes", price=5.0, discount=-1.5, category="Food")
+
+    row = build_sheet_rows(make_voucher(items=[item]))[0]
+
+    assert row[3] == 1.5
+    assert row[4] == 3.5
 
 
 def test_extract_voucher_data_returns_parsed_voucher():
-    fake_voucher = Voucher(
-        merchant="Farmacia Cruz Verde",
-        purchase_date="01/01/2026",
-        month_name="January",
-        total_amount=4990.0,
-        tax_amount=0.0,
-        suggested_category="Health",
-    )
+    fake_voucher = make_voucher()
     fake_response = MagicMock(parsed=fake_voucher)
     fake_client = MagicMock()
     fake_client.models.generate_content.return_value = fake_response
@@ -84,3 +206,23 @@ def test_extract_voucher_data_raises_when_parsing_fails():
 
     with pytest.raises(ValueError):
         extract_voucher_data(fake_client, img="fake-image")
+
+
+def test_extract_voucher_data_raises_when_no_products_found():
+    fake_response = MagicMock(parsed=make_voucher(items=[]))
+    fake_client = MagicMock()
+    fake_client.models.generate_content.return_value = fake_response
+
+    with pytest.raises(ValueError):
+        extract_voucher_data(fake_client, img="fake-image")
+
+
+def test_save_to_google_sheets_appends_all_rows():
+    rows = build_sheet_rows(make_voucher())
+    fake_gc = MagicMock()
+
+    save_to_google_sheets(fake_gc, rows)
+
+    fake_gc.open.assert_called_once_with(SHEET_NAME)
+    fake_gc.open.return_value.worksheet.assert_called_once_with(WORKSHEET_NAME)
+    fake_gc.open.return_value.worksheet.return_value.append_rows.assert_called_once_with(rows)

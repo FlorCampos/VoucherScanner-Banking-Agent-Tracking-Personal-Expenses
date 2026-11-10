@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from enum import Enum
 
 import gspread
 import streamlit as st
@@ -22,22 +23,97 @@ SHEETS_SCOPES = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
 ]
+# One spreadsheet row is written per product, in this column order.
+SHEET_COLUMNS = [
+    "Merchant",
+    "Product",
+    "Price",
+    "Discount",
+    "Price after discount",
+    "Purchase date",
+    "Month",
+    "Tax",
+    "Category",
+    "Payment method",
+    "Card brand",
+    "Card number",
+]
+CARD_MASK_LENGTH = 12
 
 PROMPT = (
     "Analyze this image of a purchase voucher/receipt and extract the "
-    "information requested in the schema. If a field does not appear in "
-    "the image, use your best estimate or a reasonable default value."
+    "information requested in the schema, with one entry in `items` per "
+    "product purchased. If a field does not appear in the image, use your "
+    "best estimate or a reasonable default value, unless the field's "
+    "description says otherwise."
 )
+
+
+class PaymentMethod(str, Enum):
+    CASH = "cash"
+    CREDIT = "credit"
+    DEBIT = "debit"
+    OTHER = "other"
+
+
+class CardBrand(str, Enum):
+    VISA = "Visa"
+    MASTERCARD = "Mastercard"
+    OTHER = "Other"
+
+
+class VoucherItem(BaseModel):
+    product: str = Field(
+        description=(
+            "Product name exactly as printed on the voucher: same language, wording "
+            "and abbreviations, without translating or rewriting it. Include its "
+            "quantity or size when the voucher shows one"
+        )
+    )
+    price: float = Field(description="Price charged for this product before any discount")
+    discount: float = Field(
+        default=0.0,
+        description=(
+            "Discount applied to this product (including a discount line printed "
+            "below it), as a positive amount; 0 if none"
+        ),
+    )
+    tax_amount: float = Field(
+        default=0.0,
+        description=(
+            "Tax (VAT/sales tax) charged on this product. If the voucher only shows "
+            "tax totals, split them across the taxed products in proportion to "
+            "their price; 0 for untaxed products"
+        ),
+    )
+    category: str = Field(
+        description="Expense category for this product, e.g. Food, Household, Health, Other"
+    )
 
 
 class Voucher(BaseModel):
     merchant: str = Field(description="Name of the merchant or establishment")
     purchase_date: str = Field(description="Voucher date in DD/MM/YYYY format")
     month_name: str = Field(description="Month name in English, e.g. January")
-    total_amount: float = Field(description="Total amount paid")
-    tax_amount: float = Field(default=0.0, description="Tax amount (VAT/sales tax), if applicable")
-    suggested_category: str = Field(
-        description="Suggested expense category, e.g. Food, Transport, Other"
+    items: list[VoucherItem] = Field(
+        description=(
+            "One entry per product purchased. Do not create entries for discounts, "
+            "taxes, subtotals or totals"
+        )
+    )
+    payment_method: PaymentMethod = Field(
+        description="How the purchase was paid: cash, credit, debit or other"
+    )
+    card_brand: CardBrand | None = Field(
+        default=None,
+        description="Card network when paid by card; null if not paid by card or not shown",
+    )
+    card_last4: str | None = Field(
+        default=None,
+        description=(
+            "Last 4 digits of the card exactly as printed on the voucher; null if "
+            "not paid by card or not shown. Never guess these digits"
+        ),
     )
 
 
@@ -91,20 +167,50 @@ def extract_voucher_data(client: genai.Client, img: Image.Image) -> Voucher:
     )
     if response.parsed is None:
         raise ValueError("The AI did not return valid JSON matching the expected schema.")
+    if not response.parsed.items:
+        raise ValueError("No products were found on the voucher.")
     return response.parsed
 
 
-def save_to_google_sheets(gc: gspread.Client, voucher: Voucher) -> None:
+def mask_card_number(last4: str | None) -> str:
+    """Format the card's last 4 digits as printed on vouchers: ************1234."""
+    digits = re.sub(r"\D", "", last4 or "")
+    if len(digits) < 4:
+        return ""
+    return "*" * CARD_MASK_LENGTH + digits[-4:]
+
+
+def build_sheet_rows(voucher: Voucher) -> list[list[str | float]]:
+    """Build one spreadsheet row per product, in SHEET_COLUMNS order."""
+    paid_in_cash = voucher.payment_method is PaymentMethod.CASH
+    card_brand = voucher.card_brand.value if voucher.card_brand and not paid_in_cash else ""
+    card_number = "" if paid_in_cash else mask_card_number(voucher.card_last4)
+
+    rows = []
+    for item in voucher.items:
+        discount = abs(item.discount)
+        rows.append(
+            [
+                voucher.merchant,
+                item.product,
+                item.price,
+                discount,
+                round(item.price - discount, 2),
+                voucher.purchase_date,
+                voucher.month_name,
+                item.tax_amount,
+                item.category,
+                voucher.payment_method.value,
+                card_brand,
+                card_number,
+            ]
+        )
+    return rows
+
+
+def save_to_google_sheets(gc: gspread.Client, rows: list[list[str | float]]) -> None:
     sh = gc.open(SHEET_NAME).worksheet(WORKSHEET_NAME)
-    row = [
-        voucher.merchant,
-        voucher.purchase_date,
-        voucher.month_name,
-        voucher.total_amount,
-        voucher.tax_amount,
-        voucher.suggested_category,
-    ]
-    sh.append_row(row)
+    sh.append_rows(rows)
 
 
 def main() -> None:
@@ -160,11 +266,12 @@ def main() -> None:
             st.error("⚠️ An unexpected error occurred while reading the voucher. Please try again.")
             return
 
-        st.json(voucher.model_dump())
+        rows = build_sheet_rows(voucher)
+        st.dataframe([dict(zip(SHEET_COLUMNS, row)) for row in rows], hide_index=True)
 
         try:
             sheets_client = get_sheets_client()
-            save_to_google_sheets(sheets_client, voucher)
+            save_to_google_sheets(sheets_client, rows)
         except SpreadsheetNotFound:
             logger.exception("Spreadsheet not found")
             st.error(

@@ -1,6 +1,6 @@
 # 📸 Voucher Scanner
 
-Streamlit app that captures or uploads a photo of a voucher/receipt, extracts its data with **Gemini 2.5 Flash** (vision + structured outputs), and automatically logs it to a **Google Sheets** spreadsheet.
+Streamlit app that captures or uploads a photo of a voucher/receipt, extracts its line items with **Gemini 2.5 Flash** (vision + structured outputs), and automatically logs them to a **Google Sheets** spreadsheet, one row per product.
 
 ## Architecture (Phase 1)
 
@@ -11,7 +11,10 @@ Image (camera / upload)
 Gemini 2.5 Flash  ──  response_schema = Voucher (Pydantic)
         │
         ▼
-Voucher (validated object)
+Voucher (validated object: merchant, date, payment, list of items)
+        │
+        ▼
+One row per product
         │
         ▼
 Google Sheets (gspread + google-auth)
@@ -20,6 +23,25 @@ Google Sheets (gspread + google-auth)
 - **OCR/Extraction**: `google-genai`, model `gemini-2.5-flash`, with `response_mime_type="application/json"` and `response_schema=Voucher`. The model is forced to return JSON that satisfies the `Voucher` Pydantic schema; if it doesn't, `response.parsed` is `None` and the app treats it as an explicit error (no manual text parsing).
 - **Persistence**: `gspread.service_account_from_dict(...)`, authenticated with `google-auth` (not `oauth2client`, which is deprecated).
 - **Secrets**: managed exclusively via `st.secrets` (Streamlit secrets), never files on disk.
+
+## Spreadsheet columns
+
+Each scanned voucher is shown as a table and appended to the worksheet with one row per product, in this column order (the app does not write a header row):
+
+| # | Column | Notes |
+|---|---|---|
+| 1 | Merchant | Same value on every row of the voucher |
+| 2 | Product | Exactly as printed on the voucher (not translated), with quantity when shown |
+| 3 | Price | Before discount |
+| 4 | Discount | `0` when the product had no discount |
+| 5 | Price after discount | Price minus discount, computed by the app |
+| 6 | Purchase date | `DD/MM/YYYY` |
+| 7 | Month | In English, e.g. `January` |
+| 8 | Tax | Tax for that product |
+| 9 | Category | Per product |
+| 10 | Payment method | `cash`, `credit`, `debit` or `other` |
+| 11 | Card brand | `Visa`, `Mastercard` or `Other`; empty for cash |
+| 12 | Card number | Last 4 digits after 12 asterisks, e.g. `************1234`; empty for cash |
 
 ## Local setup
 
@@ -61,7 +83,7 @@ Google Sheets (gspread + google-auth)
 pytest tests/ -v
 ```
 
-Covers the `Voucher` schema (required fields/type validation) and the `extract_voucher_data` function (mocking the Gemini client, no real API calls).
+Covers the `Voucher` schema (required fields/type validation), the row building and card masking (`build_sheet_rows`, `mask_card_number`), and the `extract_voucher_data` and `save_to_google_sheets` functions (mocking the Gemini and Sheets clients, no real API calls).
 
 ## Security
 
