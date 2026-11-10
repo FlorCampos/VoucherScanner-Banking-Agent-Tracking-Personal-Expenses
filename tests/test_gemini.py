@@ -43,7 +43,7 @@ def test_voucher_schema_accepts_valid_payload():
         month_name="March",
         total_amount=15990.0,
         tax_amount=2550.0,
-        suggested_category="Comida",
+        suggested_category="Food",
     )
     assert voucher.total_amount == 15990.0
     assert voucher.tax_amount == 2550.0
@@ -61,7 +61,7 @@ def test_extract_voucher_data_returns_parsed_voucher():
         month_name="January",
         total_amount=4990.0,
         tax_amount=0.0,
-        suggested_category="Salud",
+        suggested_category="Health",
     )
     fake_response = MagicMock(parsed=fake_voucher)
     fake_client = MagicMock()

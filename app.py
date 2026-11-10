@@ -24,20 +24,20 @@ SHEETS_SCOPES = [
 ]
 
 PROMPT = (
-    "Analiza esta imagen de un voucher/ticket de compra y extrae la "
-    "información solicitada en el esquema. Si un campo no aparece en la "
-    "imagen, usa tu mejor estimación o un valor por defecto razonable."
+    "Analyze this image of a purchase voucher/receipt and extract the "
+    "information requested in the schema. If a field does not appear in "
+    "the image, use your best estimate or a reasonable default value."
 )
 
 
 class Voucher(BaseModel):
-    merchant: str = Field(description="Nombre del comercio o establecimiento")
-    purchase_date: str = Field(description="Fecha del voucher en formato DD/MM/AAAA")
-    month_name: str = Field(description="Nombre del mes en inglés, ej: January")
-    total_amount: float = Field(description="Monto total pagado")
-    tax_amount: float = Field(default=0.0, description="Monto de IVA/impuesto, si aplica")
+    merchant: str = Field(description="Name of the merchant or establishment")
+    purchase_date: str = Field(description="Voucher date in DD/MM/YYYY format")
+    month_name: str = Field(description="Month name in English, e.g. January")
+    total_amount: float = Field(description="Total amount paid")
+    tax_amount: float = Field(default=0.0, description="Tax amount (VAT/sales tax), if applicable")
     suggested_category: str = Field(
-        description="Categoría de gasto sugerida, ej: Comida, Transporte, Otros"
+        description="Suggested expense category, e.g. Food, Transport, Other"
     )
 
 
@@ -90,7 +90,7 @@ def extract_voucher_data(client: genai.Client, img: Image.Image) -> Voucher:
         ),
     )
     if response.parsed is None:
-        raise ValueError("La IA no devolvió un JSON válido según el esquema esperado.")
+        raise ValueError("The AI did not return valid JSON matching the expected schema.")
     return response.parsed
 
 
@@ -108,20 +108,20 @@ def save_to_google_sheets(gc: gspread.Client, voucher: Voucher) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Scanner de Vouchers Pro", page_icon="📸")
-    st.title("📸 Scanner de Vouchers Pro")
-    st.write("Captura o sube tu voucher para guardarlo en tu presupuesto.")
+    st.set_page_config(page_title="Voucher Scanner Pro", page_icon="📸")
+    st.title("📸 Voucher Scanner Pro")
+    st.write("Capture or upload your voucher to save it to your budget.")
 
     if "scan_counter" not in st.session_state:
         st.session_state.scan_counter = 0
 
-    tab1, tab2 = st.tabs(["📸 Cámara", "📁 Subir Archivo"])
+    tab1, tab2 = st.tabs(["📸 Camera", "📁 Upload File"])
     with tab1:
         camera_photo = st.camera_input(
-            "Toma la foto", key=f"camera_{st.session_state.scan_counter}"
+            "Take a photo", key=f"camera_{st.session_state.scan_counter}"
         )
     with tab2:
-        uploaded_photo = st.file_uploader("Selecciona una imagen", type=["jpg", "jpeg", "png"])
+        uploaded_photo = st.file_uploader("Select an image", type=["jpg", "jpeg", "png"])
 
     photo = camera_photo or uploaded_photo
     if not photo:
@@ -131,33 +131,33 @@ def main() -> None:
         img = Image.open(photo)
     except Exception:
         logger.exception("Uploaded file is not a valid image")
-        st.error("⚠️ El archivo no parece ser una imagen válida. Sube un JPG o PNG.")
+        st.error("⚠️ The file does not appear to be a valid image. Upload a JPG or PNG.")
         return
 
-    st.image(img, caption="Imagen lista para procesar", use_container_width=True)
+    st.image(img, caption="Image ready to process", use_container_width=True)
 
-    if not st.button("🚀 Procesar y Guardar"):
+    if not st.button("🚀 Process and Save"):
         return
 
-    with st.spinner("La IA está leyendo el voucher..."):
+    with st.spinner("The AI is reading the voucher..."):
         try:
             gemini_client = get_gemini_client()
             voucher = extract_voucher_data(gemini_client, img)
         except genai_errors.APIError as exc:
             logger.exception("Gemini API call failed")
-            st.error(f"⚠️ Error al comunicarse con Gemini: {exc}")
+            st.error(f"⚠️ Error communicating with Gemini: {exc}")
             return
         except ValueError as exc:
             logger.exception("Gemini response did not match the schema")
-            st.error(f"⚠️ {exc} Intenta con una foto más clara o nítida.")
+            st.error(f"⚠️ {exc} Try again with a clearer, sharper photo.")
             return
         except KeyError:
             logger.exception("Missing GEMINI_KEY secret")
-            st.error("⚠️ No se configuró la API key de Gemini en los secretos de la app.")
+            st.error("⚠️ The Gemini API key is not configured in the app secrets.")
             return
         except Exception:
             logger.exception("Unexpected error calling Gemini")
-            st.error("⚠️ Ocurrió un error inesperado al leer el voucher. Intenta de nuevo.")
+            st.error("⚠️ An unexpected error occurred while reading the voucher. Please try again.")
             return
 
         st.json(voucher.model_dump())
@@ -168,33 +168,33 @@ def main() -> None:
         except SpreadsheetNotFound:
             logger.exception("Spreadsheet not found")
             st.error(
-                f"⚠️ No se encontró la hoja '{SHEET_NAME}'. Verifica el nombre "
-                "y que el service account tenga acceso."
+                f"⚠️ Spreadsheet '{SHEET_NAME}' was not found. Check the name "
+                "and that the service account has access."
             )
             return
         except WorksheetNotFound:
             logger.exception("Worksheet not found")
-            st.error(f"⚠️ No se encontró la pestaña '{WORKSHEET_NAME}' dentro de '{SHEET_NAME}'.")
+            st.error(f"⚠️ Worksheet '{WORKSHEET_NAME}' was not found in '{SHEET_NAME}'.")
             return
         except GspreadAPIError as exc:
             logger.exception("Google Sheets API call failed")
-            st.error(f"⚠️ Error al guardar en Google Sheets: {exc}")
+            st.error(f"⚠️ Error saving to Google Sheets: {exc}")
             return
         except (json.JSONDecodeError, KeyError):
             logger.exception("Google credentials misconfigured in st.secrets")
             st.error(
-                "⚠️ Las credenciales de Google Sheets no están configuradas "
-                "correctamente en los secretos de la app."
+                "⚠️ Google Sheets credentials are not configured correctly "
+                "in the app secrets."
             )
             return
         except Exception:
             logger.exception("Unexpected error saving to Google Sheets")
-            st.error("⚠️ Ocurrió un error inesperado al guardar en Google Sheets.")
+            st.error("⚠️ An unexpected error occurred while saving to Google Sheets.")
             return
 
-        st.success("✅ ¡Datos guardados correctamente en Google Sheets!")
+        st.success("✅ Data saved to Google Sheets successfully!")
         st.balloons()
-        if st.button("🔄 Escanear otro voucher"):
+        if st.button("🔄 Scan another voucher"):
             st.session_state.scan_counter += 1
             st.rerun()
 
