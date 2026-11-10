@@ -141,9 +141,10 @@ def test_build_sheet_rows_returns_one_row_per_product():
             4.99,
             1.0,
             3.99,
+            0.0,
+            3.99,
             "12/03/2026",
             "March",
-            0.0,
             "Food",
             "credit",
             "Visa",
@@ -155,9 +156,10 @@ def test_build_sheet_rows_returns_one_row_per_product():
             8.0,
             0.0,
             8.0,
+            1.2,
+            9.2,
             "12/03/2026",
             "March",
-            1.2,
             "Household",
             "credit",
             "Visa",
@@ -181,6 +183,18 @@ def test_build_sheet_rows_treats_negative_discount_as_positive():
 
     assert row[3] == 1.5
     assert row[4] == 3.5
+
+
+def test_build_sheet_rows_final_price_adds_tax_to_discounted_price():
+    item = VoucherItem(
+        product="DETERGENT 1L", price=10.0, discount=2.0, tax_amount=1.2, category="Household"
+    )
+
+    row = dict(zip(SHEET_COLUMNS, build_sheet_rows(make_voucher(items=[item]))[0]))
+
+    assert row["Price after discount"] == 8.0
+    assert row["Tax"] == 1.2
+    assert row["Final price"] == 9.2
 
 
 def test_extract_voucher_data_returns_parsed_voucher():

@@ -35,13 +35,14 @@ Each scanned voucher is shown as JSON (one object per product) and appended to t
 | 3 | Price | Before discount |
 | 4 | Discount | `0` when the product had no discount |
 | 5 | Price after discount | Price minus discount, computed by the app |
-| 6 | Purchase date | `DD/MM/YYYY` |
-| 7 | Month | In English, e.g. `January` |
-| 8 | Tax | Tax for that product |
-| 9 | Category | Per product |
-| 10 | Payment method | `cash`, `credit`, `debit` or `other` |
-| 11 | Card brand | `Visa`, `Mastercard` or `Other`; empty for cash |
-| 12 | Card number | Last 4 digits after 12 asterisks, e.g. `************1234`; empty for cash |
+| 6 | Tax | Tax for that product, applied to its price after discount |
+| 7 | Final price | Price after discount plus tax, computed by the app |
+| 8 | Purchase date | `DD/MM/YYYY` |
+| 9 | Month | In English, e.g. `January` |
+| 10 | Category | Per product |
+| 11 | Payment method | `cash`, `credit`, `debit` or `other` |
+| 12 | Card brand | `Visa`, `Mastercard` or `Other`; empty for cash |
+| 13 | Card number | Last 4 digits after 12 asterisks, e.g. `************1234`; empty for cash |
 
 ## Local setup
 

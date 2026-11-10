@@ -30,9 +30,10 @@ SHEET_COLUMNS = [
     "Price",
     "Discount",
     "Price after discount",
+    "Tax",
+    "Final price",
     "Purchase date",
     "Month",
-    "Tax",
     "Category",
     "Payment method",
     "Card brand",
@@ -81,9 +82,10 @@ class VoucherItem(BaseModel):
     tax_amount: float = Field(
         default=0.0,
         description=(
-            "Tax (VAT/sales tax) charged on this product. If the voucher only shows "
-            "tax totals, split them across the taxed products in proportion to "
-            "their price; 0 for untaxed products"
+            "Tax (VAT/sales tax) charged on this product, which applies to its price "
+            "after discount. If the voucher only shows tax totals, split them across "
+            "the taxed products in proportion to their price after discount; 0 for "
+            "untaxed products"
         ),
     )
     category: str = Field(
@@ -189,16 +191,18 @@ def build_sheet_rows(voucher: Voucher) -> list[list[str | float]]:
     rows = []
     for item in voucher.items:
         discount = abs(item.discount)
+        price_after_discount = round(item.price - discount, 2)
         rows.append(
             [
                 voucher.merchant,
                 item.product,
                 item.price,
                 discount,
-                round(item.price - discount, 2),
+                price_after_discount,
+                item.tax_amount,
+                round(price_after_discount + item.tax_amount, 2),
                 voucher.purchase_date,
                 voucher.month_name,
-                item.tax_amount,
                 item.category,
                 voucher.payment_method.value,
                 card_brand,
