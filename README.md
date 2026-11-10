@@ -26,7 +26,7 @@ Google Sheets (gspread + google-auth)
 
 ## Spreadsheet columns
 
-Each scanned voucher is shown as a table and appended to the worksheet with one row per product, in this column order (the app does not write a header row):
+Each scanned voucher is shown as JSON (one object per product) and appended to the worksheet with one row per product, in this column order (the app does not write a header row):
 
 | # | Column | Notes |
 |---|---|---|

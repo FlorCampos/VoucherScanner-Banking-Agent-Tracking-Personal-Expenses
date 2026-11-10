@@ -267,7 +267,7 @@ def main() -> None:
             return
 
         rows = build_sheet_rows(voucher)
-        st.dataframe([dict(zip(SHEET_COLUMNS, row)) for row in rows], hide_index=True)
+        st.json([dict(zip(SHEET_COLUMNS, row)) for row in rows])
 
         try:
             sheets_client = get_sheets_client()
