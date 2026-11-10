@@ -208,6 +208,7 @@ def test_extract_voucher_data_returns_parsed_voucher():
     fake_client.models.generate_content.assert_called_once()
     _, kwargs = fake_client.models.generate_content.call_args
     assert kwargs["model"] == GEMINI_MODEL
+    assert kwargs["config"].temperature == 0
     assert kwargs["config"].response_mime_type == "application/json"
     assert kwargs["config"].response_schema is Voucher
     assert result == fake_voucher

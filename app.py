@@ -94,7 +94,13 @@ class VoucherItem(BaseModel):
 
 
 class Voucher(BaseModel):
-    merchant: str = Field(description="Name of the merchant or establishment")
+    merchant: str = Field(
+        description=(
+            "Full merchant name exactly as printed at the top of the voucher, "
+            "including the branch or store name and not only the brand. Do not "
+            "shorten, translate or rewrite it"
+        )
+    )
     purchase_date: str = Field(description="Voucher date in DD/MM/YYYY format")
     month_name: str = Field(description="Month name in English, e.g. January")
     items: list[VoucherItem] = Field(
@@ -163,6 +169,7 @@ def extract_voucher_data(client: genai.Client, img: Image.Image) -> Voucher:
         model=GEMINI_MODEL,
         contents=[PROMPT, img],
         config=types.GenerateContentConfig(
+            temperature=0,
             response_mime_type="application/json",
             response_schema=Voucher,
         ),

@@ -20,7 +20,7 @@ One row per product
 Google Sheets (gspread + google-auth)
 ```
 
-- **OCR/Extraction**: `google-genai`, model `gemini-2.5-flash`, with `response_mime_type="application/json"` and `response_schema=Voucher`. The model is forced to return JSON that satisfies the `Voucher` Pydantic schema; if it doesn't, `response.parsed` is `None` and the app treats it as an explicit error (no manual text parsing).
+- **OCR/Extraction**: `google-genai`, model `gemini-2.5-flash`, with `temperature=0` (so the same voucher gives the same result as consistently as possible), `response_mime_type="application/json"` and `response_schema=Voucher`. The model is forced to return JSON that satisfies the `Voucher` Pydantic schema; if it doesn't, `response.parsed` is `None` and the app treats it as an explicit error (no manual text parsing).
 - **Persistence**: `gspread.service_account_from_dict(...)`, authenticated with `google-auth` (not `oauth2client`, which is deprecated).
 - **Secrets**: managed exclusively via `st.secrets` (Streamlit secrets), never files on disk.
 
