@@ -1,6 +1,8 @@
 import json
 import logging
 import re
+from datetime import date
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from enum import Enum
 
 import gspread
@@ -40,6 +42,7 @@ SHEET_COLUMNS = [
     "Card number",
 ]
 CARD_MASK_LENGTH = 12
+CENT = Decimal("0.01")
 
 PROMPT = (
     "Analyze this image of a purchase voucher/receipt and extract the "
@@ -48,6 +51,11 @@ PROMPT = (
     "best estimate or a reasonable default value, unless the field's "
     "description says otherwise."
 )
+
+
+def build_prompt(today: date) -> str:
+    """Add today's date to the prompt so ambiguous voucher dates can be resolved."""
+    return f"{PROMPT} Today's date is {today:%d/%m/%Y} (DD/MM/YYYY)."
 
 
 class PaymentMethod(str, Enum):
@@ -85,23 +93,37 @@ class VoucherItem(BaseModel):
     discount: float = Field(
         default=0.0,
         description=(
-            "Savings on this product compared with its regular price (including a "
-            "savings or discount line printed below it), as a positive amount; 0 if "
-            "none. Do not subtract it from price_after_discount"
+            "Amount saved on this product, as a positive number, taken from the "
+            "savings or discount line printed with it. Report it even when that line "
+            "is only informational and the printed price is already discounted (e.g. "
+            "'RABAIS SUR LE PRIX COURANT: $0.77' means a discount of 0.77). 0 only if "
+            "the voucher shows no savings for this product"
         ),
     )
-    tax_amount: float = Field(
-        default=0.0,
+    taxable: bool = Field(
         description=(
-            "Tax (VAT/sales tax) charged on this product, which applies to its price "
-            "after discount. If the voucher only shows tax totals, split them across "
-            "the taxed products in proportion to their price after discount; 0 for "
-            "untaxed products"
-        ),
+            "True only when the voucher marks this product as taxed, usually with a "
+            "tax code printed next to its price (e.g. 'FP', 'F', 'P', 'T', 'TX'). False "
+            "when the product has no such mark. If the voucher charges tax but marks "
+            "no product, set true for the products that are normally taxed"
+        )
     )
     category: str = Field(
         description="Expense category for this product, e.g. Food, Household, Health, Other"
     )
+
+
+class TaxLine(BaseModel):
+    name: str = Field(description="Tax name as printed on the voucher, e.g. TPS, TVQ, GST, HST")
+    rate_percent: float | None = Field(
+        default=None,
+        description=(
+            "Tax rate percentage printed on the voucher for this tax, e.g. 5 for "
+            "'TPS (5%)' or 9.975 for 'TVQ (9.975%)'; null if the voucher does not "
+            "print a rate. Never guess the rate"
+        ),
+    )
+    amount: float = Field(description="Amount of this tax as printed on the voucher")
 
 
 class Voucher(BaseModel):
@@ -112,12 +134,27 @@ class Voucher(BaseModel):
             "shorten, translate or rewrite it"
         )
     )
-    purchase_date: str = Field(description="Voucher date in DD/MM/YYYY format")
-    month_name: str = Field(description="Month name in English, e.g. January")
+    purchase_date: str = Field(
+        description=(
+            "Purchase date converted to DD/MM/YYYY. Vouchers may print it in another "
+            "order, such as MM/DD/YYYY or YYYY-MM-DD. When day and month are ambiguous "
+            "(e.g. '11/05/2026'), choose the reading closest to today's date without "
+            "being after it"
+        )
+    )
+    month_name: str = Field(
+        description="Month of purchase_date as its English name, e.g. January"
+    )
     items: list[VoucherItem] = Field(
         description=(
             "One entry per product purchased. Do not create entries for discounts, "
             "taxes, subtotals or totals"
+        )
+    )
+    taxes: list[TaxLine] = Field(
+        description=(
+            "One entry per tax line printed on the voucher (e.g. TPS and TVQ); empty "
+            "if the voucher charges no tax"
         )
     )
     payment_method: PaymentMethod = Field(
@@ -178,7 +215,7 @@ def extract_voucher_data(client: genai.Client, img: Image.Image) -> Voucher:
     """Call Gemini requesting a structured output validated against the Voucher schema."""
     response = client.models.generate_content(
         model=GEMINI_MODEL,
-        contents=[PROMPT, img],
+        contents=[build_prompt(date.today()), img],
         config=types.GenerateContentConfig(
             temperature=0,
             response_mime_type="application/json",
@@ -200,6 +237,47 @@ def mask_card_number(last4: str | None) -> str:
     return "*" * CARD_MASK_LENGTH + digits[-4:]
 
 
+def allocate_cents(total: Decimal, weights: list[Decimal]) -> list[Decimal]:
+    """Split `total` in proportion to `weights` into whole cents that add up exactly to it."""
+    weight_sum = sum(weights)
+    if total <= 0 or weight_sum <= 0:
+        return [Decimal("0.00")] * len(weights)
+    exact = [total * weight / weight_sum for weight in weights]
+    parts = [share.quantize(CENT, rounding=ROUND_DOWN) for share in exact]
+    leftover_cents = int((total - sum(parts)) / CENT)
+    by_largest_remainder = sorted(
+        range(len(weights)), key=lambda i: exact[i] - parts[i], reverse=True
+    )
+    for i in by_largest_remainder[:leftover_cents]:
+        parts[i] += CENT
+    return parts
+
+
+def compute_item_taxes(voucher: Voucher) -> list[float]:
+    """Tax per product, using the rates printed on the voucher.
+
+    Each tax is computed the way the cash register does it (rate applied to the
+    total of the taxed products, rounded to the cent) and then split across those
+    products, so the per-product taxes add up to the voucher's tax amounts. A tax
+    line without a printed rate falls back to its printed amount.
+    """
+    taxable_prices = [
+        Decimal(str(item.price_after_discount)) if item.taxable else Decimal(0)
+        for item in voucher.items
+    ]
+    taxable_base = sum(taxable_prices)
+    item_taxes = [Decimal("0.00")] * len(voucher.items)
+    for tax in voucher.taxes:
+        if tax.rate_percent is not None:
+            tax_total = taxable_base * Decimal(str(tax.rate_percent)) / 100
+        else:
+            tax_total = Decimal(str(tax.amount))
+        tax_total = tax_total.quantize(CENT, rounding=ROUND_HALF_UP)
+        for i, share in enumerate(allocate_cents(tax_total, taxable_prices)):
+            item_taxes[i] += share
+    return [float(tax) for tax in item_taxes]
+
+
 def build_sheet_rows(voucher: Voucher) -> list[list[str | float]]:
     """Build one spreadsheet row per product, in SHEET_COLUMNS order."""
     paid_in_cash = voucher.payment_method is PaymentMethod.CASH
@@ -207,7 +285,7 @@ def build_sheet_rows(voucher: Voucher) -> list[list[str | float]]:
     card_number = "" if paid_in_cash else mask_card_number(voucher.card_last4)
 
     rows = []
-    for item in voucher.items:
+    for item, tax in zip(voucher.items, compute_item_taxes(voucher)):
         discount = abs(item.discount)
         rows.append(
             [
@@ -216,8 +294,8 @@ def build_sheet_rows(voucher: Voucher) -> list[list[str | float]]:
                 round(item.price_after_discount + discount, 2),
                 discount,
                 item.price_after_discount,
-                item.tax_amount,
-                round(item.price_after_discount + item.tax_amount, 2),
+                tax,
+                round(item.price_after_discount + tax, 2),
                 voucher.purchase_date,
                 voucher.month_name,
                 item.category,

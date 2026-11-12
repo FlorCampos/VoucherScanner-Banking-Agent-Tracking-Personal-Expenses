@@ -1,3 +1,5 @@
+from datetime import date
+from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,10 +14,14 @@ from app import (
     WORKSHEET_NAME,
     CardBrand,
     PaymentMethod,
+    TaxLine,
     Voucher,
     VoucherItem,
     _normalize_private_key,
+    allocate_cents,
+    build_prompt,
     build_sheet_rows,
+    compute_item_taxes,
     extract_voucher_data,
     mask_card_number,
     save_to_google_sheets,
@@ -33,6 +39,13 @@ def sample_pem() -> str:
     ).decode()
 
 
+def quebec_taxes(gst_amount: float = 0.0, qst_amount: float = 0.0) -> list[TaxLine]:
+    return [
+        TaxLine(name="TPS", rate_percent=5, amount=gst_amount),
+        TaxLine(name="TVQ", rate_percent=9.975, amount=qst_amount),
+    ]
+
+
 def make_voucher(**overrides) -> Voucher:
     payload = {
         "merchant": "Supermercado Lider",
@@ -43,21 +56,59 @@ def make_voucher(**overrides) -> Voucher:
                 product="1 bottle of 500 mL almond milk",
                 price_after_discount=3.99,
                 discount=1.0,
+                taxable=False,
                 category="Food",
             ),
             VoucherItem(
                 product="1 pack of paper towels",
                 price_after_discount=8.0,
-                tax_amount=1.2,
+                taxable=True,
                 category="Household",
             ),
         ],
+        "taxes": quebec_taxes(gst_amount=0.4, qst_amount=0.8),
         "payment_method": PaymentMethod.CREDIT,
         "card_brand": CardBrand.VISA,
         "card_last4": "4417",
     }
     payload.update(overrides)
     return Voucher(**payload)
+
+
+def make_iga_voucher() -> Voucher:
+    """Voucher with already-discounted prices, two taxed products and TPS/TVQ rates."""
+    return make_voucher(
+        items=[
+            VoucherItem(
+                product="KITKAT SINGLE 4 BAT",
+                price_after_discount=1.22,
+                discount=0.77,
+                taxable=True,
+                category="Food",
+            ),
+            VoucherItem(
+                product="KITKAT SINGLE 4 BAT",
+                price_after_discount=1.22,
+                discount=0.77,
+                taxable=True,
+                category="Food",
+            ),
+            VoucherItem(
+                product="COMP OEUFS BL GROS",
+                price_after_discount=3.49,
+                discount=0.7,
+                taxable=False,
+                category="Food",
+            ),
+            VoucherItem(
+                product="PRIM POIT POULET DES",
+                price_after_discount=12.05,
+                taxable=False,
+                category="Food",
+            ),
+        ],
+        taxes=quebec_taxes(gst_amount=0.12, qst_amount=0.24),
+    )
 
 
 @pytest.mark.parametrize(
@@ -82,7 +133,8 @@ def test_voucher_schema_accepts_valid_payload():
     assert len(voucher.items) == 2
     assert voucher.items[0].discount == 1.0
     assert voucher.items[1].discount == 0.0
-    assert voucher.items[0].tax_amount == 0.0
+    assert voucher.items[1].taxable is True
+    assert [tax.rate_percent for tax in voucher.taxes] == [5, 9.975]
 
 
 def test_voucher_schema_parses_json_payload():
@@ -92,8 +144,14 @@ def test_voucher_schema_parses_json_payload():
             "purchase_date": "01/01/2026",
             "month_name": "January",
             "items": [
-                {"product": "1 box of bandages", "price_after_discount": 3.5, "category": "Health"}
+                {
+                    "product": "1 box of bandages",
+                    "price_after_discount": 3.5,
+                    "taxable": True,
+                    "category": "Health",
+                }
             ],
+            "taxes": [{"name": "TAX", "rate_percent": None, "amount": 0.52}],
             "payment_method": "debit",
             "card_brand": "Mastercard",
             "card_last4": "0021",
@@ -101,6 +159,7 @@ def test_voucher_schema_parses_json_payload():
     )
     assert voucher.payment_method is PaymentMethod.DEBIT
     assert voucher.card_brand is CardBrand.MASTERCARD
+    assert voucher.taxes[0].rate_percent is None
 
 
 def test_voucher_schema_card_fields_are_optional():
@@ -131,6 +190,56 @@ def test_voucher_schema_rejects_unknown_payment_method():
 )
 def test_mask_card_number(last4, expected):
     assert mask_card_number(last4) == expected
+
+
+def test_build_prompt_includes_todays_date():
+    prompt = build_prompt(date(2026, 11, 11))
+
+    assert prompt.endswith("Today's date is 11/11/2026 (DD/MM/YYYY).")
+
+
+def test_allocate_cents_adds_up_exactly_to_the_total():
+    parts = allocate_cents(Decimal("0.02"), [Decimal("0.10")] * 3)
+
+    assert parts == [Decimal("0.01"), Decimal("0.01"), Decimal("0.00")]
+    assert sum(parts) == Decimal("0.02")
+
+
+def test_allocate_cents_gives_nothing_to_zero_weights():
+    parts = allocate_cents(Decimal("0.36"), [Decimal("1.22"), Decimal(0), Decimal("1.22")])
+
+    assert parts == [Decimal("0.18"), Decimal("0.00"), Decimal("0.18")]
+
+
+def test_compute_item_taxes_uses_printed_rates_on_taxed_products_only():
+    taxes = compute_item_taxes(make_iga_voucher())
+
+    assert taxes == [0.18, 0.18, 0.0, 0.0]
+    assert round(sum(taxes), 2) == 0.36
+
+
+def test_compute_item_taxes_matches_register_rounding_across_products():
+    """Three 0.10 products at 5%: the register charges 0.02 in total, not 3 x 0.01."""
+    items = [
+        VoucherItem(product=f"CANDY {n}", price_after_discount=0.1, taxable=True, category="Food")
+        for n in range(3)
+    ]
+    voucher = make_voucher(items=items, taxes=[TaxLine(name="GST", rate_percent=5, amount=0.02)])
+
+    taxes = compute_item_taxes(voucher)
+
+    assert taxes == [0.01, 0.01, 0.0]
+
+
+def test_compute_item_taxes_falls_back_to_printed_amount_without_rate():
+    voucher = make_iga_voucher()
+    voucher.taxes = [TaxLine(name="TAX", amount=0.36)]
+
+    assert compute_item_taxes(voucher) == [0.18, 0.18, 0.0, 0.0]
+
+
+def test_compute_item_taxes_is_zero_when_voucher_has_no_taxes():
+    assert compute_item_taxes(make_voucher(taxes=[])) == [0.0, 0.0]
 
 
 def test_build_sheet_rows_returns_one_row_per_product():
@@ -180,7 +289,11 @@ def test_build_sheet_rows_leaves_card_columns_empty_for_cash():
 
 def test_build_sheet_rows_treats_negative_discount_as_positive():
     item = VoucherItem(
-        product="500 g of grapes", price_after_discount=3.5, discount=-1.5, category="Food"
+        product="500 g of grapes",
+        price_after_discount=3.5,
+        discount=-1.5,
+        taxable=False,
+        category="Food",
     )
 
     row = build_sheet_rows(make_voucher(items=[item]))[0]
@@ -195,7 +308,7 @@ def test_build_sheet_rows_final_price_adds_tax_to_discounted_price():
         product="DETERGENT 1L",
         price_after_discount=8.0,
         discount=2.0,
-        tax_amount=1.2,
+        taxable=True,
         category="Household",
     )
 
@@ -207,22 +320,18 @@ def test_build_sheet_rows_final_price_adds_tax_to_discounted_price():
     assert row["Final price"] == 9.2
 
 
-def test_build_sheet_rows_keeps_printed_price_when_it_is_already_discounted():
-    """Voucher that prints the discounted price plus an informational savings line."""
-    item = VoucherItem(
-        product="KITKAT SINGLE 4 BAT",
-        price_after_discount=1.22,
-        discount=0.77,
-        tax_amount=0.18,
-        category="Food",
-    )
+def test_build_sheet_rows_match_voucher_with_already_discounted_prices():
+    """Printed prices already include the discount; rows must add up to the voucher."""
+    rows = [dict(zip(SHEET_COLUMNS, row)) for row in build_sheet_rows(make_iga_voucher())]
 
-    row = dict(zip(SHEET_COLUMNS, build_sheet_rows(make_voucher(items=[item]))[0]))
-
-    assert row["Price"] == 1.99
-    assert row["Discount"] == 0.77
-    assert row["Price after discount"] == 1.22
-    assert row["Final price"] == 1.4
+    assert rows[0]["Price"] == 1.99
+    assert rows[0]["Discount"] == 0.77
+    assert rows[0]["Price after discount"] == 1.22
+    assert rows[0]["Tax"] == 0.18
+    assert rows[0]["Final price"] == 1.4
+    assert round(sum(row["Discount"] for row in rows), 2) == 2.24
+    assert round(sum(row["Price after discount"] for row in rows), 2) == 17.98
+    assert round(sum(row["Final price"] for row in rows), 2) == 18.34
 
 
 def test_extract_voucher_data_returns_parsed_voucher():
@@ -236,6 +345,8 @@ def test_extract_voucher_data_returns_parsed_voucher():
     fake_client.models.generate_content.assert_called_once()
     _, kwargs = fake_client.models.generate_content.call_args
     assert kwargs["model"] == GEMINI_MODEL
+    assert kwargs["contents"][0] == build_prompt(date.today())
+    assert kwargs["contents"][1] == "fake-image"
     assert kwargs["config"].temperature == 0
     assert kwargs["config"].response_mime_type == "application/json"
     assert kwargs["config"].response_schema is Voucher

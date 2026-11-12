@@ -35,9 +35,9 @@ Each scanned voucher is shown as JSON (one object per product) and appended to t
 | 3 | Price | Regular price before discount: price after discount plus discount, computed by the app |
 | 4 | Discount | `0` when the product had no discount |
 | 5 | Price after discount | Amount charged before tax, as it counts toward the voucher subtotal |
-| 6 | Tax | Tax for that product, applied to its price after discount |
+| 6 | Tax | Computed by the app from the tax rates printed on the voucher, only for products the voucher marks as taxed; the rows add up to the voucher's tax amounts |
 | 7 | Final price | Price after discount plus tax, computed by the app |
-| 8 | Purchase date | `DD/MM/YYYY` |
+| 8 | Purchase date | `DD/MM/YYYY`; ambiguous day/month orders are resolved to the reading closest to the scan date |
 | 9 | Month | In English, e.g. `January` |
 | 10 | Category | Per product |
 | 11 | Payment method | `cash`, `credit`, `debit` or `other` |
