@@ -1,11 +1,11 @@
 # 📸 Voucher Scanner
 
-Streamlit app that takes a photo of a voucher/receipt (taken with the phone's camera or uploaded from its gallery), extracts its line items with **Gemini 2.5 Flash** (vision + structured outputs), and automatically logs them to a **Google Sheets** spreadsheet, one row per product.
+Streamlit app that takes one or more photos of a voucher/receipt (taken with the phone's camera or uploaded from its gallery), extracts its line items with **Gemini 2.5 Flash** (vision + structured outputs), and automatically logs them to a **Google Sheets** spreadsheet, one row per product.
 
 ## Architecture (Phase 1)
 
 ```
-Image (phone photo, auto-rotated upright)
+Images (one or more phone photos of the same voucher, auto-rotated upright)
         │
         ▼
 Gemini 2.5 Flash  ──  response_schema = Voucher (Pydantic)
@@ -21,6 +21,8 @@ Google Sheets (gspread + google-auth)
 ```
 
 - **OCR/Extraction**: `google-genai`, model `gemini-2.5-flash`, with `temperature=0` (so the same voucher gives the same result as consistently as possible), `response_mime_type="application/json"` and `response_schema=Voucher`. The model is forced to return JSON that satisfies the `Voucher` Pydantic schema; if it doesn't, `response.parsed` is `None` and the app treats it as an explicit error (no manual text parsing).
+- **Long vouchers**: several overlapping close-up photos of the same voucher can be uploaded together; they are sent to the model in a single request with an instruction to list each product line only once.
+- **Total check**: after extraction the app adds up the `Final price` of all rows and compares it with the total printed on the voucher. If they differ (a product missing, duplicated or misread), it shows a warning; the rows are still saved so they can be reviewed in the sheet.
 - **Persistence**: `gspread.service_account_from_dict(...)`, authenticated with `google-auth` (not `oauth2client`, which is deprecated).
 - **Secrets**: managed exclusively via `st.secrets` (Streamlit secrets), never files on disk.
 

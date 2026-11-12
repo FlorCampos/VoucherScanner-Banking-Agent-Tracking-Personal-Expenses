@@ -66,6 +66,13 @@ PROMPT = (
     "best estimate or a reasonable default value, unless the field's "
     "description says otherwise."
 )
+MULTI_PHOTO_NOTE = (
+    "The images are photos of different parts of the same voucher and may "
+    "overlap. Treat them as one voucher. A product line that is visible in more "
+    "than one photo is the same line and must be listed only once, but identical "
+    "lines that the voucher prints separately are separate products and must "
+    "each be listed."
+)
 
 
 class PaymentMethod(str, Enum):
@@ -160,6 +167,12 @@ class Voucher(BaseModel):
             "if the voucher charges no tax"
         )
     )
+    total_amount: float = Field(
+        description=(
+            "Final total charged on the voucher, taxes included, as printed next to "
+            "the total (e.g. 'TOTAL'). Never compute it yourself"
+        )
+    )
     payment_method: PaymentMethod = Field(
         description="How the purchase was paid: cash, credit, debit or other"
     )
@@ -214,11 +227,15 @@ def get_sheets_client() -> gspread.Client:
     return gspread.service_account_from_dict(creds_dict, scopes=SHEETS_SCOPES)
 
 
-def extract_voucher_data(client: genai.Client, img: Image.Image) -> Voucher:
-    """Call Gemini requesting a structured output validated against the Voucher schema."""
+def extract_voucher_data(client: genai.Client, images: list[Image.Image]) -> Voucher:
+    """Call Gemini requesting a structured output validated against the Voucher schema.
+
+    `images` holds one or more photos of the same voucher.
+    """
+    prompt = f"{PROMPT} {MULTI_PHOTO_NOTE}" if len(images) > 1 else PROMPT
     response = client.models.generate_content(
         model=GEMINI_MODEL,
-        contents=[PROMPT, img],
+        contents=[prompt, *images],
         config=types.GenerateContentConfig(
             temperature=0,
             response_mime_type="application/json",
@@ -335,6 +352,17 @@ def build_sheet_rows(voucher: Voucher, today: date | None = None) -> list[list[s
     return rows
 
 
+def sum_final_prices(rows: list[list[str | float]]) -> float:
+    """Add up the 'Final price' column of the rows, exact to the cent."""
+    final_price = SHEET_COLUMNS.index("Final price")
+    return float(sum(Decimal(str(row[final_price])) for row in rows))
+
+
+def totals_match(rows_total: float, voucher_total: float) -> bool:
+    """True when both amounts are the same to the cent."""
+    return round(rows_total * 100) == round(voucher_total * 100)
+
+
 def save_to_google_sheets(gc: gspread.Client, rows: list[list[str | float]]) -> None:
     sh = gc.open(SHEET_NAME).worksheet(WORKSHEET_NAME)
     sh.append_rows(rows)
@@ -353,27 +381,30 @@ def start_new_scan() -> None:
 def main() -> None:
     st.set_page_config(page_title="Voucher Scanner Pro", page_icon="📸")
     st.title("📸 Voucher Scanner Pro")
-    st.write("Take or upload a photo of your voucher to save it to your budget.")
+    st.write("Take or upload photos of your voucher to save it to your budget.")
 
     if "scan_counter" not in st.session_state:
         st.session_state.scan_counter = 0
 
-    photo = st.file_uploader(
-        "Take or select a photo",
+    photos = st.file_uploader(
+        "Take or select one or more photos of the same voucher",
         type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True,
         key=f"voucher_photo_{st.session_state.scan_counter}",
+        help="For a long voucher, add several close-up photos that overlap a little.",
     )
-    if not photo:
+    if not photos:
         return
 
     try:
-        img = load_image(photo)
+        images = [load_image(photo) for photo in photos]
     except Exception:
         logger.exception("Uploaded file is not a valid image")
-        st.error("⚠️ The file does not appear to be a valid image. Upload a JPG or PNG.")
+        st.error("⚠️ A file does not appear to be a valid image. Upload JPG or PNG photos.")
         return
 
-    st.image(img, caption="Image ready to process", use_container_width=True)
+    for number, img in enumerate(images, start=1):
+        st.image(img, caption=f"Photo {number} of {len(images)}", width="stretch")
 
     if not st.button("🚀 Process and Save"):
         return
@@ -381,7 +412,7 @@ def main() -> None:
     with st.spinner("The AI is reading the voucher..."):
         try:
             gemini_client = get_gemini_client()
-            voucher = extract_voucher_data(gemini_client, img)
+            voucher = extract_voucher_data(gemini_client, images)
         except genai_errors.APIError as exc:
             logger.exception("Gemini API call failed")
             st.error(f"⚠️ Error communicating with Gemini: {exc}")
@@ -401,6 +432,21 @@ def main() -> None:
 
         rows = build_sheet_rows(voucher)
         st.json([dict(zip(SHEET_COLUMNS, row)) for row in rows])
+
+        rows_total = sum_final_prices(rows)
+        if totals_match(rows_total, voucher.total_amount):
+            st.caption(f"✅ The rows add up to the voucher total: {rows_total:.2f}")
+        else:
+            logger.warning(
+                "Rows total %.2f differs from voucher total %.2f",
+                rows_total,
+                voucher.total_amount,
+            )
+            st.warning(
+                f"⚠️ The rows add up to {rows_total:.2f} but the voucher total is "
+                f"{voucher.total_amount:.2f}. A product may be missing, duplicated or "
+                "misread. Review the rows saved in the sheet."
+            )
 
         try:
             sheets_client = get_sheets_client()

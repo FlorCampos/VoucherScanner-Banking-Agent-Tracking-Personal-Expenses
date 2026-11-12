@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from app import (
     GEMINI_MODEL,
+    MULTI_PHOTO_NOTE,
     PROMPT,
     SHEET_COLUMNS,
     SHEET_NAME,
@@ -29,6 +30,8 @@ from app import (
     mask_card_number,
     resolve_purchase_date,
     save_to_google_sheets,
+    sum_final_prices,
+    totals_match,
 )
 
 TODAY = date(2026, 11, 11)
@@ -73,6 +76,7 @@ def make_voucher(**overrides) -> Voucher:
             ),
         ],
         "taxes": quebec_taxes(gst_amount=0.4, qst_amount=0.8),
+        "total_amount": 13.19,
         "payment_method": PaymentMethod.CREDIT,
         "card_brand": CardBrand.VISA,
         "card_last4": "4417",
@@ -114,6 +118,7 @@ def make_iga_voucher() -> Voucher:
             ),
         ],
         taxes=quebec_taxes(gst_amount=0.12, qst_amount=0.24),
+        total_amount=18.34,
     )
 
 
@@ -158,6 +163,7 @@ def test_voucher_schema_parses_json_payload():
                 }
             ],
             "taxes": [{"name": "TAX", "rate_percent": None, "amount": 0.52}],
+            "total_amount": 4.02,
             "payment_method": "debit",
             "card_brand": "Mastercard",
             "card_last4": "0021",
@@ -408,17 +414,26 @@ def test_extract_voucher_data_returns_parsed_voucher():
     fake_client = MagicMock()
     fake_client.models.generate_content.return_value = fake_response
 
-    result = extract_voucher_data(fake_client, img="fake-image")
+    result = extract_voucher_data(fake_client, ["fake-image"])
 
     fake_client.models.generate_content.assert_called_once()
     _, kwargs = fake_client.models.generate_content.call_args
     assert kwargs["model"] == GEMINI_MODEL
-    assert kwargs["contents"][0] == PROMPT
-    assert kwargs["contents"][1] == "fake-image"
+    assert kwargs["contents"] == [PROMPT, "fake-image"]
     assert kwargs["config"].temperature == 0
     assert kwargs["config"].response_mime_type == "application/json"
     assert kwargs["config"].response_schema is Voucher
     assert result == fake_voucher
+
+
+def test_extract_voucher_data_sends_all_photos_with_the_multi_photo_note():
+    fake_client = MagicMock()
+    fake_client.models.generate_content.return_value = MagicMock(parsed=make_voucher())
+
+    extract_voucher_data(fake_client, ["top-photo", "bottom-photo"])
+
+    _, kwargs = fake_client.models.generate_content.call_args
+    assert kwargs["contents"] == [f"{PROMPT} {MULTI_PHOTO_NOTE}", "top-photo", "bottom-photo"]
 
 
 def test_extract_voucher_data_raises_when_parsing_fails():
@@ -427,7 +442,7 @@ def test_extract_voucher_data_raises_when_parsing_fails():
     fake_client.models.generate_content.return_value = fake_response
 
     with pytest.raises(ValueError):
-        extract_voucher_data(fake_client, img="fake-image")
+        extract_voucher_data(fake_client, ["fake-image"])
 
 
 def test_extract_voucher_data_raises_when_no_products_found():
@@ -436,7 +451,34 @@ def test_extract_voucher_data_raises_when_no_products_found():
     fake_client.models.generate_content.return_value = fake_response
 
     with pytest.raises(ValueError):
-        extract_voucher_data(fake_client, img="fake-image")
+        extract_voucher_data(fake_client, ["fake-image"])
+
+
+def test_rows_add_up_to_the_voucher_total():
+    voucher = make_iga_voucher()
+
+    rows_total = sum_final_prices(build_sheet_rows(voucher))
+
+    assert rows_total == 18.34
+    assert totals_match(rows_total, voucher.total_amount)
+
+
+def test_totals_do_not_match_when_a_product_is_duplicated():
+    voucher = make_iga_voucher()
+    voucher.items.append(voucher.items[-1])
+
+    rows_total = sum_final_prices(build_sheet_rows(voucher))
+
+    assert rows_total == 30.39
+    assert not totals_match(rows_total, voucher.total_amount)
+
+
+@pytest.mark.parametrize(
+    ("rows_total", "voucher_total", "expected"),
+    [(18.34, 18.34, True), (0.1 + 0.2, 0.3, True), (18.35, 18.34, False), (18.33, 18.34, False)],
+)
+def test_totals_match_compares_to_the_cent(rows_total, voucher_total, expected):
+    assert totals_match(rows_total, voucher_total) is expected
 
 
 def test_save_to_google_sheets_appends_all_rows():
