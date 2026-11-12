@@ -1,13 +1,13 @@
 import json
 import logging
 import re
-from datetime import date
+from datetime import date, datetime
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from enum import Enum
 
 import gspread
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageOps
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
@@ -43,6 +43,21 @@ SHEET_COLUMNS = [
 ]
 CARD_MASK_LENGTH = 12
 CENT = Decimal("0.01")
+DATE_FORMAT = "%d/%m/%Y"
+MONTH_NAMES = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
 
 PROMPT = (
     "Analyze this image of a purchase voucher/receipt and extract the "
@@ -51,11 +66,6 @@ PROMPT = (
     "best estimate or a reasonable default value, unless the field's "
     "description says otherwise."
 )
-
-
-def build_prompt(today: date) -> str:
-    """Add today's date to the prompt so ambiguous voucher dates can be resolved."""
-    return f"{PROMPT} Today's date is {today:%d/%m/%Y} (DD/MM/YYYY)."
 
 
 class PaymentMethod(str, Enum):
@@ -134,14 +144,7 @@ class Voucher(BaseModel):
             "shorten, translate or rewrite it"
         )
     )
-    purchase_date: str = Field(
-        description=(
-            "Purchase date converted to DD/MM/YYYY. Vouchers may print it in another "
-            "order, such as MM/DD/YYYY or YYYY-MM-DD. When day and month are ambiguous "
-            "(e.g. '11/05/2026'), choose the reading closest to today's date without "
-            "being after it"
-        )
-    )
+    purchase_date: str = Field(description="Purchase date in DD/MM/YYYY format")
     month_name: str = Field(
         description="Month of purchase_date as its English name, e.g. January"
     )
@@ -215,7 +218,7 @@ def extract_voucher_data(client: genai.Client, img: Image.Image) -> Voucher:
     """Call Gemini requesting a structured output validated against the Voucher schema."""
     response = client.models.generate_content(
         model=GEMINI_MODEL,
-        contents=[build_prompt(date.today()), img],
+        contents=[PROMPT, img],
         config=types.GenerateContentConfig(
             temperature=0,
             response_mime_type="application/json",
@@ -278,11 +281,36 @@ def compute_item_taxes(voucher: Voucher) -> list[float]:
     return [float(tax) for tax in item_taxes]
 
 
-def build_sheet_rows(voucher: Voucher) -> list[list[str | float]]:
+def resolve_purchase_date(raw_date: str, today: date) -> date | None:
+    """Parse a DD/MM/YYYY date, fixing day/month mix-ups.
+
+    Vouchers print dates in different orders (e.g. '11/05/2026' may mean 5
+    November), so when day and month can be swapped this keeps the reading
+    closest to `today` that is not in the future. Returns None if `raw_date` is
+    not a valid DD/MM/YYYY date.
+    """
+    try:
+        parsed = datetime.strptime(raw_date.strip(), DATE_FORMAT).date()
+    except ValueError:
+        return None
+    candidates = [parsed]
+    if parsed.day <= 12 and parsed.day != parsed.month:
+        candidates.append(parsed.replace(day=parsed.month, month=parsed.day))
+    not_in_future = [candidate for candidate in candidates if candidate <= today]
+    return min(not_in_future or candidates, key=lambda candidate: abs((today - candidate).days))
+
+
+def build_sheet_rows(voucher: Voucher, today: date | None = None) -> list[list[str | float]]:
     """Build one spreadsheet row per product, in SHEET_COLUMNS order."""
     paid_in_cash = voucher.payment_method is PaymentMethod.CASH
     card_brand = voucher.card_brand.value if voucher.card_brand and not paid_in_cash else ""
     card_number = "" if paid_in_cash else mask_card_number(voucher.card_last4)
+
+    purchase_date, month_name = voucher.purchase_date, voucher.month_name
+    resolved_date = resolve_purchase_date(voucher.purchase_date, today or date.today())
+    if resolved_date:
+        purchase_date = resolved_date.strftime(DATE_FORMAT)
+        month_name = MONTH_NAMES[resolved_date.month - 1]
 
     rows = []
     for item, tax in zip(voucher.items, compute_item_taxes(voucher)):
@@ -296,8 +324,8 @@ def build_sheet_rows(voucher: Voucher) -> list[list[str | float]]:
                 item.price_after_discount,
                 tax,
                 round(item.price_after_discount + tax, 2),
-                voucher.purchase_date,
-                voucher.month_name,
+                purchase_date,
+                month_name,
                 item.category,
                 voucher.payment_method.value,
                 card_brand,
@@ -312,28 +340,34 @@ def save_to_google_sheets(gc: gspread.Client, rows: list[list[str | float]]) -> 
     sh.append_rows(rows)
 
 
+def load_image(photo) -> Image.Image:
+    """Open the photo upright, applying the orientation the phone stored in its EXIF data."""
+    return ImageOps.exif_transpose(Image.open(photo))
+
+
+def start_new_scan() -> None:
+    """Clear the uploaded photo by giving the uploader a new key."""
+    st.session_state.scan_counter += 1
+
+
 def main() -> None:
     st.set_page_config(page_title="Voucher Scanner Pro", page_icon="📸")
     st.title("📸 Voucher Scanner Pro")
-    st.write("Capture or upload your voucher to save it to your budget.")
+    st.write("Take or upload a photo of your voucher to save it to your budget.")
 
     if "scan_counter" not in st.session_state:
         st.session_state.scan_counter = 0
 
-    tab1, tab2 = st.tabs(["📸 Camera", "📁 Upload File"])
-    with tab1:
-        camera_photo = st.camera_input(
-            "Take a photo", key=f"camera_{st.session_state.scan_counter}"
-        )
-    with tab2:
-        uploaded_photo = st.file_uploader("Select an image", type=["jpg", "jpeg", "png"])
-
-    photo = camera_photo or uploaded_photo
+    photo = st.file_uploader(
+        "Take or select a photo",
+        type=["jpg", "jpeg", "png"],
+        key=f"voucher_photo_{st.session_state.scan_counter}",
+    )
     if not photo:
         return
 
     try:
-        img = Image.open(photo)
+        img = load_image(photo)
     except Exception:
         logger.exception("Uploaded file is not a valid image")
         st.error("⚠️ The file does not appear to be a valid image. Upload a JPG or PNG.")
@@ -400,9 +434,7 @@ def main() -> None:
 
         st.success("✅ Data saved to Google Sheets successfully!")
         st.balloons()
-        if st.button("🔄 Scan another voucher"):
-            st.session_state.scan_counter += 1
-            st.rerun()
+        st.button("🔄 Scan another voucher", on_click=start_new_scan)
 
 
 if __name__ == "__main__":

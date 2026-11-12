@@ -1,11 +1,11 @@
 # 📸 Voucher Scanner
 
-Streamlit app that captures or uploads a photo of a voucher/receipt, extracts its line items with **Gemini 2.5 Flash** (vision + structured outputs), and automatically logs them to a **Google Sheets** spreadsheet, one row per product.
+Streamlit app that takes a photo of a voucher/receipt (taken with the phone's camera or uploaded from its gallery), extracts its line items with **Gemini 2.5 Flash** (vision + structured outputs), and automatically logs them to a **Google Sheets** spreadsheet, one row per product.
 
 ## Architecture (Phase 1)
 
 ```
-Image (camera / upload)
+Image (phone photo, auto-rotated upright)
         │
         ▼
 Gemini 2.5 Flash  ──  response_schema = Voucher (Pydantic)
@@ -37,8 +37,8 @@ Each scanned voucher is shown as JSON (one object per product) and appended to t
 | 5 | Price after discount | Amount charged before tax, as it counts toward the voucher subtotal |
 | 6 | Tax | Computed by the app from the tax rates printed on the voucher, only for products the voucher marks as taxed; the rows add up to the voucher's tax amounts |
 | 7 | Final price | Price after discount plus tax, computed by the app |
-| 8 | Purchase date | `DD/MM/YYYY`; ambiguous day/month orders are resolved to the reading closest to the scan date |
-| 9 | Month | In English, e.g. `January` |
+| 8 | Purchase date | `DD/MM/YYYY`; when day and month could be swapped, the app keeps the reading closest to the scan date that is not in the future |
+| 9 | Month | In English, e.g. `January`; derived by the app from the purchase date |
 | 10 | Category | Per product |
 | 11 | Payment method | `cash`, `credit`, `debit` or `other` |
 | 12 | Card brand | `Visa`, `Mastercard` or `Other`; empty for cash |

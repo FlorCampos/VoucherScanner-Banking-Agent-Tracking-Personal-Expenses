@@ -1,3 +1,4 @@
+import io
 from datetime import date
 from decimal import Decimal
 from unittest.mock import MagicMock
@@ -5,10 +6,12 @@ from unittest.mock import MagicMock
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from PIL import Image
 from pydantic import ValidationError
 
 from app import (
     GEMINI_MODEL,
+    PROMPT,
     SHEET_COLUMNS,
     SHEET_NAME,
     WORKSHEET_NAME,
@@ -19,13 +22,16 @@ from app import (
     VoucherItem,
     _normalize_private_key,
     allocate_cents,
-    build_prompt,
     build_sheet_rows,
     compute_item_taxes,
     extract_voucher_data,
+    load_image,
     mask_card_number,
+    resolve_purchase_date,
     save_to_google_sheets,
 )
+
+TODAY = date(2026, 11, 11)
 
 
 @pytest.fixture(scope="module")
@@ -49,8 +55,8 @@ def quebec_taxes(gst_amount: float = 0.0, qst_amount: float = 0.0) -> list[TaxLi
 def make_voucher(**overrides) -> Voucher:
     payload = {
         "merchant": "Supermercado Lider",
-        "purchase_date": "12/03/2026",
-        "month_name": "March",
+        "purchase_date": "25/10/2026",
+        "month_name": "October",
         "items": [
             VoucherItem(
                 product="1 bottle of 500 mL almond milk",
@@ -192,10 +198,72 @@ def test_mask_card_number(last4, expected):
     assert mask_card_number(last4) == expected
 
 
-def test_build_prompt_includes_todays_date():
-    prompt = build_prompt(date(2026, 11, 11))
+@pytest.mark.parametrize(
+    ("raw_date", "expected"),
+    [
+        ("25/10/2026", date(2026, 10, 25)),
+        ("11/05/2026", date(2026, 11, 5)),
+        ("05/11/2026", date(2026, 11, 5)),
+        ("11/11/2026", date(2026, 11, 11)),
+        ("03/12/2026", date(2026, 3, 12)),
+        (" 09/11/2026 ", date(2026, 11, 9)),
+        ("31/02/2026", None),
+        ("2026-11-05", None),
+        ("", None),
+    ],
+    ids=[
+        "unambiguous",
+        "month-first print becomes recent date",
+        "already correct stays",
+        "same day and month",
+        "future reading is discarded",
+        "surrounding spaces",
+        "impossible date",
+        "other format",
+        "empty",
+    ],
+)
+def test_resolve_purchase_date(raw_date, expected):
+    assert resolve_purchase_date(raw_date, TODAY) == expected
 
-    assert prompt.endswith("Today's date is 11/11/2026 (DD/MM/YYYY).")
+
+def test_build_sheet_rows_fixes_swapped_day_and_month():
+    voucher = make_voucher(purchase_date="11/05/2026", month_name="May")
+
+    row = dict(zip(SHEET_COLUMNS, build_sheet_rows(voucher, today=TODAY)[0]))
+
+    assert row["Purchase date"] == "05/11/2026"
+    assert row["Month"] == "November"
+
+
+def test_build_sheet_rows_keeps_extracted_date_when_it_cannot_be_parsed():
+    voucher = make_voucher(purchase_date="2026-11-05", month_name="November")
+
+    row = dict(zip(SHEET_COLUMNS, build_sheet_rows(voucher, today=TODAY)[0]))
+
+    assert row["Purchase date"] == "2026-11-05"
+    assert row["Month"] == "November"
+
+
+def test_load_image_applies_phone_orientation():
+    """A photo stored sideways with EXIF orientation 6 must come out upright."""
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    buffer = io.BytesIO()
+    Image.new("RGB", (40, 20), "white").save(buffer, format="JPEG", exif=exif)
+    buffer.seek(0)
+
+    img = load_image(buffer)
+
+    assert img.size == (20, 40)
+
+
+def test_load_image_leaves_upright_photos_unchanged():
+    buffer = io.BytesIO()
+    Image.new("RGB", (40, 20), "white").save(buffer, format="PNG")
+    buffer.seek(0)
+
+    assert load_image(buffer).size == (40, 20)
 
 
 def test_allocate_cents_adds_up_exactly_to_the_total():
@@ -254,8 +322,8 @@ def test_build_sheet_rows_returns_one_row_per_product():
             3.99,
             0.0,
             3.99,
-            "12/03/2026",
-            "March",
+            "25/10/2026",
+            "October",
             "Food",
             "credit",
             "Visa",
@@ -269,8 +337,8 @@ def test_build_sheet_rows_returns_one_row_per_product():
             8.0,
             1.2,
             9.2,
-            "12/03/2026",
-            "March",
+            "25/10/2026",
+            "October",
             "Household",
             "credit",
             "Visa",
@@ -345,7 +413,7 @@ def test_extract_voucher_data_returns_parsed_voucher():
     fake_client.models.generate_content.assert_called_once()
     _, kwargs = fake_client.models.generate_content.call_args
     assert kwargs["model"] == GEMINI_MODEL
-    assert kwargs["contents"][0] == build_prompt(date.today())
+    assert kwargs["contents"][0] == PROMPT
     assert kwargs["contents"][1] == "fake-image"
     assert kwargs["config"].temperature == 0
     assert kwargs["config"].response_mime_type == "application/json"
