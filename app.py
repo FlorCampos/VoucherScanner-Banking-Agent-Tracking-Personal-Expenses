@@ -71,12 +71,23 @@ class VoucherItem(BaseModel):
             "quantity or size when the voucher shows one"
         )
     )
-    price: float = Field(description="Price charged for this product before any discount")
+    price_after_discount: float = Field(
+        description=(
+            "Amount charged for this product before tax and after any discount, i.e. "
+            "the amount that counts toward the voucher subtotal. When a savings line "
+            "printed below the product is only informational (e.g. 'RABAIS SUR LE PRIX "
+            "COURANT: $0.77' under a product printed at $1.22), the printed price is "
+            "already discounted, so use it as is ($1.22). Subtract a discount only "
+            "when the voucher itself subtracts it as a separate negative amount. The "
+            "amounts of all items must add up to the voucher subtotal"
+        )
+    )
     discount: float = Field(
         default=0.0,
         description=(
-            "Discount applied to this product (including a discount line printed "
-            "below it), as a positive amount; 0 if none"
+            "Savings on this product compared with its regular price (including a "
+            "savings or discount line printed below it), as a positive amount; 0 if "
+            "none. Do not subtract it from price_after_discount"
         ),
     )
     tax_amount: float = Field(
@@ -198,16 +209,15 @@ def build_sheet_rows(voucher: Voucher) -> list[list[str | float]]:
     rows = []
     for item in voucher.items:
         discount = abs(item.discount)
-        price_after_discount = round(item.price - discount, 2)
         rows.append(
             [
                 voucher.merchant,
                 item.product,
-                item.price,
+                round(item.price_after_discount + discount, 2),
                 discount,
-                price_after_discount,
+                item.price_after_discount,
                 item.tax_amount,
-                round(price_after_discount + item.tax_amount, 2),
+                round(item.price_after_discount + item.tax_amount, 2),
                 voucher.purchase_date,
                 voucher.month_name,
                 item.category,

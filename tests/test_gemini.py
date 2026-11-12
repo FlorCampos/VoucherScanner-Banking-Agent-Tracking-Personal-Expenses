@@ -41,13 +41,13 @@ def make_voucher(**overrides) -> Voucher:
         "items": [
             VoucherItem(
                 product="1 bottle of 500 mL almond milk",
-                price=4.99,
+                price_after_discount=3.99,
                 discount=1.0,
                 category="Food",
             ),
             VoucherItem(
                 product="1 pack of paper towels",
-                price=8.0,
+                price_after_discount=8.0,
                 tax_amount=1.2,
                 category="Household",
             ),
@@ -91,7 +91,9 @@ def test_voucher_schema_parses_json_payload():
             "merchant": "Farmacia Cruz Verde",
             "purchase_date": "01/01/2026",
             "month_name": "January",
-            "items": [{"product": "1 box of bandages", "price": 3.5, "category": "Health"}],
+            "items": [
+                {"product": "1 box of bandages", "price_after_discount": 3.5, "category": "Health"}
+            ],
             "payment_method": "debit",
             "card_brand": "Mastercard",
             "card_last4": "0021",
@@ -177,24 +179,50 @@ def test_build_sheet_rows_leaves_card_columns_empty_for_cash():
 
 
 def test_build_sheet_rows_treats_negative_discount_as_positive():
-    item = VoucherItem(product="500 g of grapes", price=5.0, discount=-1.5, category="Food")
+    item = VoucherItem(
+        product="500 g of grapes", price_after_discount=3.5, discount=-1.5, category="Food"
+    )
 
     row = build_sheet_rows(make_voucher(items=[item]))[0]
 
+    assert row[2] == 5.0
     assert row[3] == 1.5
     assert row[4] == 3.5
 
 
 def test_build_sheet_rows_final_price_adds_tax_to_discounted_price():
     item = VoucherItem(
-        product="DETERGENT 1L", price=10.0, discount=2.0, tax_amount=1.2, category="Household"
+        product="DETERGENT 1L",
+        price_after_discount=8.0,
+        discount=2.0,
+        tax_amount=1.2,
+        category="Household",
     )
 
     row = dict(zip(SHEET_COLUMNS, build_sheet_rows(make_voucher(items=[item]))[0]))
 
+    assert row["Price"] == 10.0
     assert row["Price after discount"] == 8.0
     assert row["Tax"] == 1.2
     assert row["Final price"] == 9.2
+
+
+def test_build_sheet_rows_keeps_printed_price_when_it_is_already_discounted():
+    """Voucher that prints the discounted price plus an informational savings line."""
+    item = VoucherItem(
+        product="KITKAT SINGLE 4 BAT",
+        price_after_discount=1.22,
+        discount=0.77,
+        tax_amount=0.18,
+        category="Food",
+    )
+
+    row = dict(zip(SHEET_COLUMNS, build_sheet_rows(make_voucher(items=[item]))[0]))
+
+    assert row["Price"] == 1.99
+    assert row["Discount"] == 0.77
+    assert row["Price after discount"] == 1.22
+    assert row["Final price"] == 1.4
 
 
 def test_extract_voucher_data_returns_parsed_voucher():

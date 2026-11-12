@@ -32,9 +32,9 @@ Each scanned voucher is shown as JSON (one object per product) and appended to t
 |---|---|---|
 | 1 | Merchant | Same value on every row of the voucher |
 | 2 | Product | Exactly as printed on the voucher (not translated), with quantity when shown |
-| 3 | Price | Before discount |
+| 3 | Price | Regular price before discount: price after discount plus discount, computed by the app |
 | 4 | Discount | `0` when the product had no discount |
-| 5 | Price after discount | Price minus discount, computed by the app |
+| 5 | Price after discount | Amount charged before tax, as it counts toward the voucher subtotal |
 | 6 | Tax | Tax for that product, applied to its price after discount |
 | 7 | Final price | Price after discount plus tax, computed by the app |
 | 8 | Purchase date | `DD/MM/YYYY` |
