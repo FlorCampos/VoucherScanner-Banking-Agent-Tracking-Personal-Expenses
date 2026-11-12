@@ -117,13 +117,16 @@ class VoucherItem(BaseModel):
             "the voucher shows no savings for this product"
         ),
     )
-    taxable: bool = Field(
+    tax_code: str | None = Field(
+        default=None,
         description=(
-            "True only when the voucher marks this product as taxed, usually with a "
-            "tax code printed next to its price (e.g. 'FP', 'F', 'P', 'T', 'TX'). False "
-            "when the product has no such mark. If the voucher charges tax but marks "
-            "no product, set true for the products that are normally taxed"
-        )
+            "Tax code printed on this product's line, usually right after its price, "
+            "copied exactly as printed (e.g. 'FP', 'F', 'P', 'T', 'TX'). null when "
+            "nothing is printed after the price; most grocery products have none. Copy "
+            "what is printed, do not infer it from the kind of product. Check your "
+            "answer: the prices of the products that have a tax code, multiplied by "
+            "the tax rates, must give the tax amounts printed on the voucher"
+        ),
     )
     category: str = Field(
         description="Expense category for this product, e.g. Food, Household, Health, Other"
@@ -158,7 +161,8 @@ class Voucher(BaseModel):
     items: list[VoucherItem] = Field(
         description=(
             "One entry per product purchased. Do not create entries for discounts, "
-            "taxes, subtotals or totals"
+            "taxes, subtotals, totals or zero-amount lines that are not products (e.g. "
+            "promotions or loyalty stamps)"
         )
     )
     taxes: list[TaxLine] = Field(
@@ -242,11 +246,16 @@ def extract_voucher_data(client: genai.Client, images: list[Image.Image]) -> Vou
             response_schema=Voucher,
         ),
     )
-    if response.parsed is None:
+    voucher = response.parsed
+    if voucher is None:
         raise ValueError("The AI did not return valid JSON matching the expected schema.")
-    if not response.parsed.items:
+    # Zero-amount lines (promotions, loyalty stamps) are not purchases.
+    voucher.items = [
+        item for item in voucher.items if item.price_after_discount or item.discount
+    ]
+    if not voucher.items:
         raise ValueError("No products were found on the voucher.")
-    return response.parsed
+    return voucher
 
 
 def mask_card_number(last4: str | None) -> str:
@@ -280,10 +289,17 @@ def compute_item_taxes(voucher: Voucher) -> list[float]:
     total of the taxed products, rounded to the cent) and then split across those
     products, so the per-product taxes add up to the voucher's tax amounts. A tax
     line without a printed rate falls back to its printed amount.
+
+    The taxed products are the ones with a tax code printed on their line. If the
+    voucher charges tax but prints no codes at all (e.g. a restaurant bill), every
+    product is treated as taxed.
     """
+    taxed = [bool((item.tax_code or "").strip()) for item in voucher.items]
+    if not any(taxed) and any(tax.amount > 0 for tax in voucher.taxes):
+        taxed = [True] * len(voucher.items)
     taxable_prices = [
-        Decimal(str(item.price_after_discount)) if item.taxable else Decimal(0)
-        for item in voucher.items
+        Decimal(str(item.price_after_discount)) if is_taxed else Decimal(0)
+        for item, is_taxed in zip(voucher.items, taxed)
     ]
     taxable_base = sum(taxable_prices)
     item_taxes = [Decimal("0.00")] * len(voucher.items)
@@ -352,10 +368,10 @@ def build_sheet_rows(voucher: Voucher, today: date | None = None) -> list[list[s
     return rows
 
 
-def sum_final_prices(rows: list[list[str | float]]) -> float:
-    """Add up the 'Final price' column of the rows, exact to the cent."""
-    final_price = SHEET_COLUMNS.index("Final price")
-    return float(sum(Decimal(str(row[final_price])) for row in rows))
+def sum_column(rows: list[list[str | float]], column: str) -> float:
+    """Add up one numeric column of the rows (e.g. 'Final price'), exact to the cent."""
+    index = SHEET_COLUMNS.index(column)
+    return float(sum(Decimal(str(row[index])) for row in rows))
 
 
 def totals_match(rows_total: float, voucher_total: float) -> bool:
@@ -433,19 +449,25 @@ def main() -> None:
         rows = build_sheet_rows(voucher)
         st.json([dict(zip(SHEET_COLUMNS, row)) for row in rows])
 
-        rows_total = sum_final_prices(rows)
+        rows_total = sum_column(rows, "Final price")
         if totals_match(rows_total, voucher.total_amount):
             st.caption(f"✅ The rows add up to the voucher total: {rows_total:.2f}")
         else:
+            rows_tax = sum_column(rows, "Tax")
+            voucher_tax = sum(tax.amount for tax in voucher.taxes)
             logger.warning(
-                "Rows total %.2f differs from voucher total %.2f",
+                "Rows total %.2f differs from voucher total %.2f (tax %.2f vs %.2f)",
                 rows_total,
                 voucher.total_amount,
+                rows_tax,
+                voucher_tax,
             )
             st.warning(
                 f"⚠️ The rows add up to {rows_total:.2f} but the voucher total is "
-                f"{voucher.total_amount:.2f}. A product may be missing, duplicated or "
-                "misread. Review the rows saved in the sheet."
+                f"{voucher.total_amount:.2f}. Tax in the rows: {rows_tax:.2f}; tax "
+                f"printed on the voucher: {voucher_tax:.2f}. A product may be missing, "
+                "duplicated or misread, or wrongly marked as taxed. Review the rows "
+                "saved in the sheet."
             )
 
         try:

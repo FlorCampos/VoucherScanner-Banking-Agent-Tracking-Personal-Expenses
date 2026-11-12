@@ -22,7 +22,7 @@ Google Sheets (gspread + google-auth)
 
 - **OCR/Extraction**: `google-genai`, model `gemini-2.5-flash`, with `temperature=0` (so the same voucher gives the same result as consistently as possible), `response_mime_type="application/json"` and `response_schema=Voucher`. The model is forced to return JSON that satisfies the `Voucher` Pydantic schema; if it doesn't, `response.parsed` is `None` and the app treats it as an explicit error (no manual text parsing).
 - **Long vouchers**: several overlapping close-up photos of the same voucher can be uploaded together; they are sent to the model in a single request with an instruction to list each product line only once.
-- **Total check**: after extraction the app adds up the `Final price` of all rows and compares it with the total printed on the voucher. If they differ (a product missing, duplicated or misread), it shows a warning; the rows are still saved so they can be reviewed in the sheet.
+- **Total check**: after extraction the app adds up the `Final price` of all rows and compares it with the total printed on the voucher. If they differ (a product missing, duplicated or misread), it shows a warning with both totals and the tax in the rows versus the tax printed on the voucher; the rows are still saved so they can be reviewed in the sheet.
 - **Persistence**: `gspread.service_account_from_dict(...)`, authenticated with `google-auth` (not `oauth2client`, which is deprecated).
 - **Secrets**: managed exclusively via `st.secrets` (Streamlit secrets), never files on disk.
 
@@ -37,7 +37,7 @@ Each scanned voucher is shown as JSON (one object per product) and appended to t
 | 3 | Price | Regular price before discount: price after discount plus discount, computed by the app |
 | 4 | Discount | `0` when the product had no discount |
 | 5 | Price after discount | Amount charged before tax, as it counts toward the voucher subtotal |
-| 6 | Tax | Computed by the app from the tax rates printed on the voucher, only for products the voucher marks as taxed; the rows add up to the voucher's tax amounts |
+| 6 | Tax | Computed by the app from the tax rates printed on the voucher, only for products that have a tax code printed on their line (e.g. `FP`); the rows add up to the voucher's tax amounts |
 | 7 | Final price | Price after discount plus tax, computed by the app |
 | 8 | Purchase date | `DD/MM/YYYY`; when day and month could be swapped, the app keeps the reading closest to the scan date that is not in the future |
 | 9 | Month | In English, e.g. `January`; derived by the app from the purchase date |

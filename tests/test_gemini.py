@@ -30,7 +30,7 @@ from app import (
     mask_card_number,
     resolve_purchase_date,
     save_to_google_sheets,
-    sum_final_prices,
+    sum_column,
     totals_match,
 )
 
@@ -65,13 +65,13 @@ def make_voucher(**overrides) -> Voucher:
                 product="1 bottle of 500 mL almond milk",
                 price_after_discount=3.99,
                 discount=1.0,
-                taxable=False,
+                tax_code=None,
                 category="Food",
             ),
             VoucherItem(
                 product="1 pack of paper towels",
                 price_after_discount=8.0,
-                taxable=True,
+                tax_code="FP",
                 category="Household",
             ),
         ],
@@ -93,27 +93,27 @@ def make_iga_voucher() -> Voucher:
                 product="KITKAT SINGLE 4 BAT",
                 price_after_discount=1.22,
                 discount=0.77,
-                taxable=True,
+                tax_code="FP",
                 category="Food",
             ),
             VoucherItem(
                 product="KITKAT SINGLE 4 BAT",
                 price_after_discount=1.22,
                 discount=0.77,
-                taxable=True,
+                tax_code="FP",
                 category="Food",
             ),
             VoucherItem(
                 product="COMP OEUFS BL GROS",
                 price_after_discount=3.49,
                 discount=0.7,
-                taxable=False,
+                tax_code=None,
                 category="Food",
             ),
             VoucherItem(
                 product="PRIM POIT POULET DES",
                 price_after_discount=12.05,
-                taxable=False,
+                tax_code=None,
                 category="Food",
             ),
         ],
@@ -144,7 +144,7 @@ def test_voucher_schema_accepts_valid_payload():
     assert len(voucher.items) == 2
     assert voucher.items[0].discount == 1.0
     assert voucher.items[1].discount == 0.0
-    assert voucher.items[1].taxable is True
+    assert voucher.items[1].tax_code == "FP"
     assert [tax.rate_percent for tax in voucher.taxes] == [5, 9.975]
 
 
@@ -158,7 +158,7 @@ def test_voucher_schema_parses_json_payload():
                 {
                     "product": "1 box of bandages",
                     "price_after_discount": 3.5,
-                    "taxable": True,
+                    "tax_code": "T",
                     "category": "Health",
                 }
             ],
@@ -295,7 +295,7 @@ def test_compute_item_taxes_uses_printed_rates_on_taxed_products_only():
 def test_compute_item_taxes_matches_register_rounding_across_products():
     """Three 0.10 products at 5%: the register charges 0.02 in total, not 3 x 0.01."""
     items = [
-        VoucherItem(product=f"CANDY {n}", price_after_discount=0.1, taxable=True, category="Food")
+        VoucherItem(product=f"CANDY {n}", price_after_discount=0.1, tax_code="FP", category="Food")
         for n in range(3)
     ]
     voucher = make_voucher(items=items, taxes=[TaxLine(name="GST", rate_percent=5, amount=0.02)])
@@ -308,6 +308,24 @@ def test_compute_item_taxes_matches_register_rounding_across_products():
 def test_compute_item_taxes_falls_back_to_printed_amount_without_rate():
     voucher = make_iga_voucher()
     voucher.taxes = [TaxLine(name="TAX", amount=0.36)]
+
+    assert compute_item_taxes(voucher) == [0.18, 0.18, 0.0, 0.0]
+
+
+def test_compute_item_taxes_treats_every_product_as_taxed_when_no_codes_are_printed():
+    """A restaurant bill charges tax but prints no per-product tax codes."""
+    items = [
+        VoucherItem(product="SOUP", price_after_discount=10.0, category="Food"),
+        VoucherItem(product="PASTA", price_after_discount=20.0, category="Food"),
+    ]
+    voucher = make_voucher(items=items, taxes=quebec_taxes(gst_amount=1.5, qst_amount=2.99))
+
+    assert compute_item_taxes(voucher) == [1.5, 2.99]
+
+
+def test_compute_item_taxes_ignores_blank_tax_codes():
+    voucher = make_iga_voucher()
+    voucher.items[2].tax_code = "  "
 
     assert compute_item_taxes(voucher) == [0.18, 0.18, 0.0, 0.0]
 
@@ -366,7 +384,7 @@ def test_build_sheet_rows_treats_negative_discount_as_positive():
         product="500 g of grapes",
         price_after_discount=3.5,
         discount=-1.5,
-        taxable=False,
+        tax_code=None,
         category="Food",
     )
 
@@ -382,7 +400,7 @@ def test_build_sheet_rows_final_price_adds_tax_to_discounted_price():
         product="DETERGENT 1L",
         price_after_discount=8.0,
         discount=2.0,
-        taxable=True,
+        tax_code="FP",
         category="Household",
     )
 
@@ -445,6 +463,35 @@ def test_extract_voucher_data_raises_when_parsing_fails():
         extract_voucher_data(fake_client, ["fake-image"])
 
 
+def test_extract_voucher_data_drops_zero_amount_lines():
+    voucher = make_iga_voucher()
+    voucher.items.append(
+        VoucherItem(product="TIMBRE", price_after_discount=0.0, category="Other")
+    )
+    fake_client = MagicMock()
+    fake_client.models.generate_content.return_value = MagicMock(parsed=voucher)
+
+    result = extract_voucher_data(fake_client, ["fake-image"])
+
+    assert [item.product for item in result.items] == [
+        "KITKAT SINGLE 4 BAT",
+        "KITKAT SINGLE 4 BAT",
+        "COMP OEUFS BL GROS",
+        "PRIM POIT POULET DES",
+    ]
+
+
+def test_extract_voucher_data_raises_when_only_zero_amount_lines_found():
+    zero_line = VoucherItem(product="TIMBRE", price_after_discount=0.0, category="Other")
+    fake_client = MagicMock()
+    fake_client.models.generate_content.return_value = MagicMock(
+        parsed=make_voucher(items=[zero_line])
+    )
+
+    with pytest.raises(ValueError):
+        extract_voucher_data(fake_client, ["fake-image"])
+
+
 def test_extract_voucher_data_raises_when_no_products_found():
     fake_response = MagicMock(parsed=make_voucher(items=[]))
     fake_client = MagicMock()
@@ -457,9 +504,11 @@ def test_extract_voucher_data_raises_when_no_products_found():
 def test_rows_add_up_to_the_voucher_total():
     voucher = make_iga_voucher()
 
-    rows_total = sum_final_prices(build_sheet_rows(voucher))
+    rows = build_sheet_rows(voucher)
+    rows_total = sum_column(rows, "Final price")
 
     assert rows_total == 18.34
+    assert sum_column(rows, "Tax") == 0.36
     assert totals_match(rows_total, voucher.total_amount)
 
 
@@ -467,7 +516,7 @@ def test_totals_do_not_match_when_a_product_is_duplicated():
     voucher = make_iga_voucher()
     voucher.items.append(voucher.items[-1])
 
-    rows_total = sum_final_prices(build_sheet_rows(voucher))
+    rows_total = sum_column(build_sheet_rows(voucher), "Final price")
 
     assert rows_total == 30.39
     assert not totals_match(rows_total, voucher.total_amount)
