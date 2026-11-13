@@ -13,6 +13,7 @@ from google.genai import errors as genai_errors
 from google.genai import types
 from gspread.exceptions import APIError as GspreadAPIError
 from gspread.exceptions import SpreadsheetNotFound, WorksheetNotFound
+from gspread.utils import absolute_range_name, rowcol_to_a1
 from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO)
@@ -42,6 +43,9 @@ SHEET_COLUMNS = [
     "Card number",
 ]
 CARD_MASK_LENGTH = 12
+# Background colors that alternate between consecutive vouchers in the sheet.
+WHITE = {"red": 1.0, "green": 1.0, "blue": 1.0}
+LIGHT_BLUE = {"red": 221 / 255, "green": 235 / 255, "blue": 247 / 255}
 CENT = Decimal("0.01")
 DATE_FORMAT = "%d/%m/%Y"
 MONTH_NAMES = (
@@ -379,9 +383,72 @@ def totals_match(rows_total: float, voucher_total: float) -> bool:
     return round(rows_total * 100) == round(voucher_total * 100)
 
 
-def save_to_google_sheets(gc: gspread.Client, rows: list[list[str | float]]) -> None:
+def parse_row_span(updated_range: str) -> tuple[int, int]:
+    """First and last row number of an A1 range such as "'Sheet'!A115:M124"."""
+    cells = updated_range.rsplit("!", 1)[-1].replace("$", "")
+    match = re.fullmatch(r"[A-Z]+(\d+)(?::[A-Z]+(\d+))?", cells)
+    if not match:
+        raise ValueError(f"Unexpected range: {updated_range!r}")
+    first_row = int(match.group(1))
+    return first_row, int(match.group(2) or first_row)
+
+
+def is_same_color(color: dict, other: dict) -> bool:
+    """Compare two Sheets API colors; a missing channel means 0."""
+    return all(
+        abs(color.get(channel, 0.0) - other.get(channel, 0.0)) <= 0.01
+        for channel in ("red", "green", "blue")
+    )
+
+
+def next_band_color(previous_color: dict | None) -> dict:
+    """Color for a new voucher: the opposite of the voucher above it."""
+    if previous_color is not None and is_same_color(previous_color, LIGHT_BLUE):
+        return WHITE
+    return LIGHT_BLUE
+
+
+def read_row_color(worksheet: gspread.Worksheet, row: int) -> dict | None:
+    """Background color of column A in `row`, or None if it cannot be read."""
+    if row < 1:
+        return None
+    metadata = worksheet.spreadsheet.fetch_sheet_metadata(
+        params={
+            "includeGridData": "true",
+            "ranges": absolute_range_name(worksheet.title, f"A{row}"),
+            "fields": "sheets.data.rowData.values.effectiveFormat.backgroundColor",
+        }
+    )
+    try:
+        cell = metadata["sheets"][0]["data"][0]["rowData"][0]["values"][0]
+        return cell["effectiveFormat"]["backgroundColor"]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def color_voucher_rows(worksheet: gspread.Worksheet, first_row: int, last_row: int) -> None:
+    """Paint the voucher's rows with the color the voucher above does not have."""
+    color = next_band_color(read_row_color(worksheet, first_row - 1))
+    last_cell = rowcol_to_a1(last_row, len(SHEET_COLUMNS))
+    worksheet.format(f"A{first_row}:{last_cell}", {"backgroundColor": color})
+
+
+def save_to_google_sheets(gc: gspread.Client, rows: list[list[str | float]]) -> bool:
+    """Append the voucher's rows and paint them as one block.
+
+    Consecutive vouchers alternate between two background colors so it is easy to
+    see where each one starts and ends. Returns False when the rows were saved but
+    could not be colored.
+    """
     sh = gc.open(SHEET_NAME).worksheet(WORKSHEET_NAME)
-    sh.append_rows(rows)
+    response = sh.append_rows(rows)
+    try:
+        first_row, last_row = parse_row_span(response["updates"]["updatedRange"])
+        color_voucher_rows(sh, first_row, last_row)
+    except Exception:
+        logger.exception("Rows were saved but could not be colored")
+        return False
+    return True
 
 
 def load_image(photo) -> Image.Image:
@@ -472,7 +539,7 @@ def main() -> None:
 
         try:
             sheets_client = get_sheets_client()
-            save_to_google_sheets(sheets_client, rows)
+            rows_colored = save_to_google_sheets(sheets_client, rows)
         except SpreadsheetNotFound:
             logger.exception("Spreadsheet not found")
             st.error(
@@ -501,6 +568,8 @@ def main() -> None:
             return
 
         st.success("✅ Data saved to Google Sheets successfully!")
+        if not rows_colored:
+            st.warning("⚠️ The rows were saved, but their background color could not be applied.")
         st.balloons()
         st.button("🔄 Scan another voucher", on_click=start_new_scan)
 

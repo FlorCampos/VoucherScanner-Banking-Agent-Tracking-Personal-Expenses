@@ -11,10 +11,12 @@ from pydantic import ValidationError
 
 from app import (
     GEMINI_MODEL,
+    LIGHT_BLUE,
     MULTI_PHOTO_NOTE,
     PROMPT,
     SHEET_COLUMNS,
     SHEET_NAME,
+    WHITE,
     WORKSHEET_NAME,
     CardBrand,
     PaymentMethod,
@@ -24,10 +26,14 @@ from app import (
     _normalize_private_key,
     allocate_cents,
     build_sheet_rows,
+    color_voucher_rows,
     compute_item_taxes,
     extract_voucher_data,
     load_image,
     mask_card_number,
+    next_band_color,
+    parse_row_span,
+    read_row_color,
     resolve_purchase_date,
     save_to_google_sheets,
     sum_column,
@@ -530,12 +536,127 @@ def test_totals_match_compares_to_the_cent(rows_total, voucher_total, expected):
     assert totals_match(rows_total, voucher_total) is expected
 
 
-def test_save_to_google_sheets_appends_all_rows():
-    rows = build_sheet_rows(make_voucher())
-    fake_gc = MagicMock()
+def cell_metadata(color: dict | None) -> dict:
+    """Sheets API response for one cell's background color."""
+    cell = {} if color is None else {"effectiveFormat": {"backgroundColor": color}}
+    return {"sheets": [{"data": [{"rowData": [{"values": [cell]}]}]}]}
 
-    save_to_google_sheets(fake_gc, rows)
+
+def make_worksheet(previous_color: dict | None = None, updated_range: str | None = None):
+    worksheet = MagicMock()
+    worksheet.title = WORKSHEET_NAME
+    worksheet.spreadsheet.fetch_sheet_metadata.return_value = cell_metadata(previous_color)
+    worksheet.append_rows.return_value = {"updates": {"updatedRange": updated_range}}
+    return worksheet
+
+
+@pytest.mark.parametrize(
+    ("updated_range", "expected"),
+    [
+        ("'Micro-expenses-2026'!A115:M124", (115, 124)),
+        ("'Micro-expenses-2026'!A7:M7", (7, 7)),
+        ("Sheet1!A2", (2, 2)),
+        ("'Micro-expenses-2026'!$A$115:$M$124", (115, 124)),
+    ],
+)
+def test_parse_row_span(updated_range, expected):
+    assert parse_row_span(updated_range) == expected
+
+
+def test_parse_row_span_rejects_unexpected_ranges():
+    with pytest.raises(ValueError):
+        parse_row_span("'Micro-expenses-2026'!A:M")
+
+
+@pytest.mark.parametrize(
+    ("previous_color", "expected"),
+    [
+        (None, LIGHT_BLUE),
+        (WHITE, LIGHT_BLUE),
+        ({}, LIGHT_BLUE),
+        ({"red": 1, "green": 0.9}, LIGHT_BLUE),
+        (LIGHT_BLUE, WHITE),
+        ({"red": 0.8666667, "green": 0.92156863, "blue": 0.96862745}, WHITE),
+    ],
+    ids=["unknown", "white", "black", "other color", "light blue", "light blue as returned"],
+)
+def test_next_band_color_alternates_with_the_voucher_above(previous_color, expected):
+    assert next_band_color(previous_color) == expected
+
+
+def test_read_row_color_asks_only_for_the_cell_background():
+    worksheet = make_worksheet(previous_color=LIGHT_BLUE)
+
+    assert read_row_color(worksheet, 114) == LIGHT_BLUE
+    worksheet.spreadsheet.fetch_sheet_metadata.assert_called_once_with(
+        params={
+            "includeGridData": "true",
+            "ranges": "'Micro-expenses-2026'!A114",
+            "fields": "sheets.data.rowData.values.effectiveFormat.backgroundColor",
+        }
+    )
+
+
+def test_read_row_color_returns_none_when_there_is_no_format_or_no_row_above():
+    assert read_row_color(make_worksheet(previous_color=None), 114) is None
+    assert read_row_color(make_worksheet(previous_color=LIGHT_BLUE), 0) is None
+
+
+def test_color_voucher_rows_paints_the_whole_block_across_all_columns():
+    worksheet = make_worksheet(previous_color=WHITE)
+
+    color_voucher_rows(worksheet, 115, 124)
+
+    worksheet.format.assert_called_once_with("A115:M124", {"backgroundColor": LIGHT_BLUE})
+
+
+def test_color_voucher_rows_uses_white_after_a_light_blue_voucher():
+    worksheet = make_worksheet(previous_color=LIGHT_BLUE)
+
+    color_voucher_rows(worksheet, 125, 128)
+
+    worksheet.format.assert_called_once_with("A125:M128", {"backgroundColor": WHITE})
+
+
+def test_save_to_google_sheets_appends_all_rows_and_colors_them():
+    rows = build_sheet_rows(make_voucher())
+    worksheet = make_worksheet(
+        previous_color=WHITE, updated_range="'Micro-expenses-2026'!A115:M116"
+    )
+    fake_gc = MagicMock()
+    fake_gc.open.return_value.worksheet.return_value = worksheet
+
+    colored = save_to_google_sheets(fake_gc, rows)
 
     fake_gc.open.assert_called_once_with(SHEET_NAME)
     fake_gc.open.return_value.worksheet.assert_called_once_with(WORKSHEET_NAME)
-    fake_gc.open.return_value.worksheet.return_value.append_rows.assert_called_once_with(rows)
+    worksheet.append_rows.assert_called_once_with(rows)
+    worksheet.format.assert_called_once_with("A115:M116", {"backgroundColor": LIGHT_BLUE})
+    assert colored is True
+
+
+def test_save_to_google_sheets_keeps_the_rows_when_coloring_fails():
+    rows = build_sheet_rows(make_voucher())
+    worksheet = make_worksheet(
+        previous_color=WHITE, updated_range="'Micro-expenses-2026'!A115:M116"
+    )
+    worksheet.format.side_effect = RuntimeError("formatting not allowed")
+    fake_gc = MagicMock()
+    fake_gc.open.return_value.worksheet.return_value = worksheet
+
+    colored = save_to_google_sheets(fake_gc, rows)
+
+    worksheet.append_rows.assert_called_once_with(rows)
+    assert colored is False
+
+
+def test_save_to_google_sheets_does_not_hide_errors_when_saving_fails():
+    worksheet = make_worksheet()
+    worksheet.append_rows.side_effect = RuntimeError("quota exceeded")
+    fake_gc = MagicMock()
+    fake_gc.open.return_value.worksheet.return_value = worksheet
+
+    with pytest.raises(RuntimeError):
+        save_to_google_sheets(fake_gc, build_sheet_rows(make_voucher()))
+
+    worksheet.format.assert_not_called()
