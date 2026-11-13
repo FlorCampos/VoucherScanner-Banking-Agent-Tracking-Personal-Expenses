@@ -23,7 +23,7 @@ Google Sheets (gspread + google-auth)
 - **OCR/Extraction**: `google-genai`, model `gemini-2.5-flash`, with `temperature=0` (so the same voucher gives the same result as consistently as possible), `response_mime_type="application/json"` and `response_schema=Voucher`. The model is forced to return JSON that satisfies the `Voucher` Pydantic schema; if it doesn't, `response.parsed` is `None` and the app treats it as an explicit error (no manual text parsing).
 - **Long vouchers**: several overlapping close-up photos of the same voucher can be uploaded together; they are sent to the model in a single request with an instruction to list each product line only once.
 - **Total check**: after extraction the app adds up the `Final price` of all rows and compares it with the total printed on the voucher. If they differ (a product missing, duplicated or misread), it shows a warning with both totals and the tax in the rows versus the tax printed on the voucher; the rows are still saved so they can be reviewed in the sheet.
-- **Voucher colors**: after appending a voucher's rows, the app paints them as one block, alternating between white and light blue from one voucher to the next, so it is easy to see where each voucher starts and ends. It reads the color of the row above to pick the other one. If coloring fails, the rows stay saved and the app shows a warning.
+- **Voucher blocks**: after appending a voucher's rows, the app formats them as one block. The rows alternate between white and light blue from one voucher to the next (it reads the color of the row above to pick the other one), and the voucher total is merged into a single centered cell spanning the block. If formatting fails, the rows stay saved and the app shows a warning. Note that Google Sheets cannot sort a range that contains vertically merged cells.
 - **Persistence**: `gspread.service_account_from_dict(...)`, authenticated with `google-auth` (not `oauth2client`, which is deprecated).
 - **Secrets**: managed exclusively via `st.secrets` (Streamlit secrets), never files on disk.
 
@@ -46,6 +46,7 @@ Each scanned voucher is shown as JSON (one object per product) and appended to t
 | 11 | Payment method | `cash`, `credit`, `debit` or `other` |
 | 12 | Card brand | `Visa`, `Mastercard` or `Other`; empty for cash |
 | 13 | Card number | Last 4 digits after 12 asterisks, e.g. `************1234`; empty for cash |
+| 14 | Voucher total | Total printed on the voucher, written once per voucher in a single cell merged across its rows; shown in bold red when it does not match the sum of `Final price` |
 
 ## Local setup
 

@@ -14,6 +14,7 @@ from app import (
     LIGHT_BLUE,
     MULTI_PHOTO_NOTE,
     PROMPT,
+    RED,
     SHEET_COLUMNS,
     SHEET_NAME,
     WHITE,
@@ -26,9 +27,9 @@ from app import (
     _normalize_private_key,
     allocate_cents,
     build_sheet_rows,
-    color_voucher_rows,
     compute_item_taxes,
     extract_voucher_data,
+    format_voucher_block,
     load_image,
     mask_card_number,
     next_band_color,
@@ -602,52 +603,116 @@ def test_read_row_color_returns_none_when_there_is_no_format_or_no_row_above():
     assert read_row_color(make_worksheet(previous_color=LIGHT_BLUE), 0) is None
 
 
-def test_color_voucher_rows_paints_the_whole_block_across_all_columns():
+CENTERED = {"horizontalAlignment": "CENTER", "verticalAlignment": "MIDDLE"}
+
+
+def test_format_voucher_block_colors_the_rows_and_merges_the_total():
     worksheet = make_worksheet(previous_color=WHITE)
 
-    color_voucher_rows(worksheet, 115, 124)
+    format_voucher_block(worksheet, 115, 124)
 
-    worksheet.format.assert_called_once_with("A115:M124", {"backgroundColor": LIGHT_BLUE})
+    worksheet.merge_cells.assert_called_once_with("N115:N124")
+    worksheet.batch_format.assert_called_once_with(
+        [
+            {"range": "A115:N124", "format": {"backgroundColor": LIGHT_BLUE}},
+            {"range": "N115:N124", "format": CENTERED},
+        ]
+    )
 
 
-def test_color_voucher_rows_uses_white_after_a_light_blue_voucher():
+def test_format_voucher_block_uses_white_after_a_light_blue_voucher():
     worksheet = make_worksheet(previous_color=LIGHT_BLUE)
 
-    color_voucher_rows(worksheet, 125, 128)
+    format_voucher_block(worksheet, 125, 128)
 
-    worksheet.format.assert_called_once_with("A125:M128", {"backgroundColor": WHITE})
+    formats = worksheet.batch_format.call_args[0][0]
+    assert formats[0] == {"range": "A125:N128", "format": {"backgroundColor": WHITE}}
 
 
-def test_save_to_google_sheets_appends_all_rows_and_colors_them():
+def test_format_voucher_block_does_not_merge_a_single_row_voucher():
+    worksheet = make_worksheet(previous_color=WHITE)
+
+    format_voucher_block(worksheet, 130, 130)
+
+    worksheet.merge_cells.assert_not_called()
+    worksheet.batch_format.assert_called_once_with(
+        [
+            {"range": "A130:N130", "format": {"backgroundColor": LIGHT_BLUE}},
+            {"range": "N130:N130", "format": CENTERED},
+        ]
+    )
+
+
+def test_format_voucher_block_marks_a_total_that_does_not_match_in_bold_red():
+    worksheet = make_worksheet(previous_color=WHITE)
+
+    format_voucher_block(worksheet, 115, 118, total_matches=False)
+
+    formats = worksheet.batch_format.call_args[0][0]
+    assert formats[1] == {
+        "range": "N115:N118",
+        "format": {**CENTERED, "textFormat": {"bold": True, "foregroundColor": RED}},
+    }
+
+
+def test_save_to_google_sheets_writes_the_total_once_and_formats_the_block():
     rows = build_sheet_rows(make_voucher())
     worksheet = make_worksheet(
-        previous_color=WHITE, updated_range="'Micro-expenses-2026'!A115:M116"
+        previous_color=WHITE, updated_range="'Micro-expenses-2026'!A115:N116"
     )
     fake_gc = MagicMock()
     fake_gc.open.return_value.worksheet.return_value = worksheet
 
-    colored = save_to_google_sheets(fake_gc, rows)
+    formatted = save_to_google_sheets(fake_gc, rows, voucher_total=13.19)
 
     fake_gc.open.assert_called_once_with(SHEET_NAME)
     fake_gc.open.return_value.worksheet.assert_called_once_with(WORKSHEET_NAME)
-    worksheet.append_rows.assert_called_once_with(rows)
-    worksheet.format.assert_called_once_with("A115:M116", {"backgroundColor": LIGHT_BLUE})
-    assert colored is True
+    worksheet.append_rows.assert_called_once_with([[*rows[0], 13.19], [*rows[1], ""]])
+    worksheet.merge_cells.assert_called_once_with("N115:N116")
+    worksheet.batch_format.assert_called_once()
+    assert formatted is True
 
 
-def test_save_to_google_sheets_keeps_the_rows_when_coloring_fails():
+def test_save_to_google_sheets_does_not_change_the_rows_it_receives():
     rows = build_sheet_rows(make_voucher())
     worksheet = make_worksheet(
-        previous_color=WHITE, updated_range="'Micro-expenses-2026'!A115:M116"
+        previous_color=WHITE, updated_range="'Micro-expenses-2026'!A115:N116"
     )
-    worksheet.format.side_effect = RuntimeError("formatting not allowed")
     fake_gc = MagicMock()
     fake_gc.open.return_value.worksheet.return_value = worksheet
 
-    colored = save_to_google_sheets(fake_gc, rows)
+    save_to_google_sheets(fake_gc, rows, voucher_total=13.19)
 
-    worksheet.append_rows.assert_called_once_with(rows)
-    assert colored is False
+    assert all(len(row) == len(SHEET_COLUMNS) for row in rows)
+
+
+def test_save_to_google_sheets_passes_a_total_mismatch_to_the_formatting():
+    rows = build_sheet_rows(make_voucher())
+    worksheet = make_worksheet(
+        previous_color=WHITE, updated_range="'Micro-expenses-2026'!A115:N116"
+    )
+    fake_gc = MagicMock()
+    fake_gc.open.return_value.worksheet.return_value = worksheet
+
+    save_to_google_sheets(fake_gc, rows, voucher_total=99.0, total_matches=False)
+
+    total_format = worksheet.batch_format.call_args[0][0][1]["format"]
+    assert total_format["textFormat"] == {"bold": True, "foregroundColor": RED}
+
+
+def test_save_to_google_sheets_keeps_the_rows_when_formatting_fails():
+    rows = build_sheet_rows(make_voucher())
+    worksheet = make_worksheet(
+        previous_color=WHITE, updated_range="'Micro-expenses-2026'!A115:N116"
+    )
+    worksheet.merge_cells.side_effect = RuntimeError("formatting not allowed")
+    fake_gc = MagicMock()
+    fake_gc.open.return_value.worksheet.return_value = worksheet
+
+    formatted = save_to_google_sheets(fake_gc, rows, voucher_total=13.19)
+
+    worksheet.append_rows.assert_called_once()
+    assert formatted is False
 
 
 def test_save_to_google_sheets_does_not_hide_errors_when_saving_fails():
@@ -657,6 +722,7 @@ def test_save_to_google_sheets_does_not_hide_errors_when_saving_fails():
     fake_gc.open.return_value.worksheet.return_value = worksheet
 
     with pytest.raises(RuntimeError):
-        save_to_google_sheets(fake_gc, build_sheet_rows(make_voucher()))
+        save_to_google_sheets(fake_gc, build_sheet_rows(make_voucher()), voucher_total=13.19)
 
-    worksheet.format.assert_not_called()
+    worksheet.merge_cells.assert_not_called()
+    worksheet.batch_format.assert_not_called()

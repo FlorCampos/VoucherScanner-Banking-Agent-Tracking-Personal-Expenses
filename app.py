@@ -46,6 +46,9 @@ CARD_MASK_LENGTH = 12
 # Background colors that alternate between consecutive vouchers in the sheet.
 WHITE = {"red": 1.0, "green": 1.0, "blue": 1.0}
 LIGHT_BLUE = {"red": 221 / 255, "green": 235 / 255, "blue": 247 / 255}
+RED = {"red": 0.8, "green": 0.0, "blue": 0.0}
+# The voucher total goes in the column right after SHEET_COLUMNS, once per voucher.
+VOUCHER_TOTAL_COLUMN = len(SHEET_COLUMNS) + 1
 CENT = Decimal("0.01")
 DATE_FORMAT = "%d/%m/%Y"
 MONTH_NAMES = (
@@ -426,27 +429,56 @@ def read_row_color(worksheet: gspread.Worksheet, row: int) -> dict | None:
         return None
 
 
-def color_voucher_rows(worksheet: gspread.Worksheet, first_row: int, last_row: int) -> None:
-    """Paint the voucher's rows with the color the voucher above does not have."""
+def format_voucher_block(
+    worksheet: gspread.Worksheet, first_row: int, last_row: int, total_matches: bool = True
+) -> None:
+    """Format a voucher's rows as one block.
+
+    The rows get the background color the voucher above does not have, and the
+    voucher total becomes a single centered cell spanning all of them. A total
+    that does not match the sum of the rows is shown in bold red.
+    """
     color = next_band_color(read_row_color(worksheet, first_row - 1))
-    last_cell = rowcol_to_a1(last_row, len(SHEET_COLUMNS))
-    worksheet.format(f"A{first_row}:{last_cell}", {"backgroundColor": color})
+    total_top = rowcol_to_a1(first_row, VOUCHER_TOTAL_COLUMN)
+    total_bottom = rowcol_to_a1(last_row, VOUCHER_TOTAL_COLUMN)
+    total_cells = f"{total_top}:{total_bottom}"
+    if last_row > first_row:
+        worksheet.merge_cells(total_cells)
+
+    total_format: dict = {"horizontalAlignment": "CENTER", "verticalAlignment": "MIDDLE"}
+    if not total_matches:
+        total_format["textFormat"] = {"bold": True, "foregroundColor": RED}
+    worksheet.batch_format(
+        [
+            {"range": f"A{first_row}:{total_bottom}", "format": {"backgroundColor": color}},
+            {"range": total_cells, "format": total_format},
+        ]
+    )
 
 
-def save_to_google_sheets(gc: gspread.Client, rows: list[list[str | float]]) -> bool:
-    """Append the voucher's rows and paint them as one block.
+def save_to_google_sheets(
+    gc: gspread.Client,
+    rows: list[list[str | float]],
+    voucher_total: float,
+    total_matches: bool = True,
+) -> bool:
+    """Append the voucher's rows with its total and format them as one block.
 
-    Consecutive vouchers alternate between two background colors so it is easy to
-    see where each one starts and ends. Returns False when the rows were saved but
-    could not be colored.
+    The total printed on the voucher is written once, next to the first row, and
+    then merged across the voucher's rows. Consecutive vouchers alternate between
+    two background colors so it is easy to see where each one starts and ends.
+    Returns False when the rows were saved but could not be formatted.
     """
     sh = gc.open(SHEET_NAME).worksheet(WORKSHEET_NAME)
-    response = sh.append_rows(rows)
+    sheet_rows = [
+        [*row, voucher_total if index == 0 else ""] for index, row in enumerate(rows)
+    ]
+    response = sh.append_rows(sheet_rows)
     try:
         first_row, last_row = parse_row_span(response["updates"]["updatedRange"])
-        color_voucher_rows(sh, first_row, last_row)
+        format_voucher_block(sh, first_row, last_row, total_matches)
     except Exception:
-        logger.exception("Rows were saved but could not be colored")
+        logger.exception("Rows were saved but could not be formatted")
         return False
     return True
 
@@ -517,7 +549,8 @@ def main() -> None:
         st.json([dict(zip(SHEET_COLUMNS, row)) for row in rows])
 
         rows_total = sum_column(rows, "Final price")
-        if totals_match(rows_total, voucher.total_amount):
+        total_matches = totals_match(rows_total, voucher.total_amount)
+        if total_matches:
             st.caption(f"✅ The rows add up to the voucher total: {rows_total:.2f}")
         else:
             rows_tax = sum_column(rows, "Tax")
@@ -539,7 +572,9 @@ def main() -> None:
 
         try:
             sheets_client = get_sheets_client()
-            rows_colored = save_to_google_sheets(sheets_client, rows)
+            rows_formatted = save_to_google_sheets(
+                sheets_client, rows, voucher.total_amount, total_matches
+            )
         except SpreadsheetNotFound:
             logger.exception("Spreadsheet not found")
             st.error(
@@ -568,8 +603,11 @@ def main() -> None:
             return
 
         st.success("✅ Data saved to Google Sheets successfully!")
-        if not rows_colored:
-            st.warning("⚠️ The rows were saved, but their background color could not be applied.")
+        if not rows_formatted:
+            st.warning(
+                "⚠️ The rows were saved, but their format (color and merged total) could "
+                "not be applied."
+            )
         st.balloons()
         st.button("🔄 Scan another voucher", on_click=start_new_scan)
 
